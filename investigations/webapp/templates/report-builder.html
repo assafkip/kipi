@@ -1,0 +1,80 @@
+{% extends "_layout.html" %}
+{% block title %}Client report · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto">
+  {% include "_output_views.html" %}
+  <h1 class="text-xl font-semibold">Build a client report</h1>
+  <p class="text-sm text-ink-muted mt-1 mb-5">
+    A branded, print-ready report for
+    {% if nav and nav.active_case %}<span class="font-mono text-accent">{{ nav.active_case }}</span>.{% else %}the selected case.{% endif %}
+    Save as PDF from the print dialog. Tune branding + sections per client.
+  </p>
+
+  {% if not nav or not nav.active_case %}
+  <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg p-4 text-sm text-sev-med">
+    Pick a case first (top-right switcher) — the report is scoped to one investigation.
+  </div>
+  {% else %}
+  <form id="rf" class="space-y-5">
+    <div class="grid grid-cols-2 gap-4">
+      <label class="block"><span class="text-xs uppercase tracking-wider text-ink-muted">Client name</span>
+        <input name="client" placeholder="e.g. Acme Corp" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></label>
+      <label class="block"><span class="text-xs uppercase tracking-wider text-ink-muted">Prepared by</span>
+        <input name="prepared_by" value="{{ nav.analyst if nav and nav.analyst != 'anonymous' else '' }}" placeholder="your name / firm" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></label>
+    </div>
+    <label class="block"><span class="text-xs uppercase tracking-wider text-ink-muted">Report title</span>
+      <input name="title" placeholder="Intelligence Report — {{ nav.active_case }}" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></label>
+    <div class="grid grid-cols-2 gap-4">
+      <label class="block"><span class="text-xs uppercase tracking-wider text-ink-muted">Accent colour</span>
+        <input name="accent" type="color" value="#1e3a5f" class="mt-1 h-10 w-full bg-bg-soft border border-bg-border rounded"></label>
+      <label class="block"><span class="text-xs uppercase tracking-wider text-ink-muted">Logo URL (optional)</span>
+        <input name="logo" placeholder="https://…/logo.png" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></label>
+    </div>
+
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-xs uppercase tracking-wider text-ink-muted">Sections</span>
+        <span class="text-xs">
+          <a href="#" onclick="preset('exec');return false" class="text-accent hover:underline">Executive brief</a>
+          <span class="text-ink-faint mx-1">·</span>
+          <a href="#" onclick="preset('full');return false" class="text-accent hover:underline">Full report</a>
+        </span>
+      </div>
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        {% for key, label in [('summary','Executive summary'), ('actors','Priority actors'), ('dossiers','Actor dossiers'), ('iocs','Indicators of compromise'), ('crosscase','Cross-case links'), ('methodology','Methodology & provenance')] %}
+        <label class="flex items-center gap-2 bg-bg-card border border-bg-border rounded px-3 py-2">
+          <input type="checkbox" class="sec" value="{{ key }}" checked> {{ label }}
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 pt-1">
+      <button type="submit" class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover">Generate report ↗</button>
+      <span class="text-xs text-ink-muted">Opens in a new tab. Then Print → Save as PDF.</span>
+    </div>
+  </form>
+  {% endif %}
+</div>
+
+<script>
+  function preset(kind) {
+    const on = kind === 'full'
+      ? ['summary','actors','dossiers','iocs','crosscase','methodology']
+      : ['summary','actors','methodology'];
+    document.querySelectorAll('.sec').forEach(c => { c.checked = on.includes(c.value); });
+  }
+  const f = document.getElementById('rf');
+  if (f) f.addEventListener('submit', e => {
+    e.preventDefault();
+    const data = new FormData(f);
+    const secs = [...document.querySelectorAll('.sec:checked')].map(c => c.value).join(',') || 'summary';
+    const p = new URLSearchParams();
+    for (const k of ['client','title','prepared_by','accent','logo']) {
+      const v = (data.get(k) || '').trim(); if (v) p.set(k, v);
+    }
+    p.set('sections', secs);
+    window.open('/report/render?' + p.toString(), '_blank');
+  });
+</script>
+{% endblock %}

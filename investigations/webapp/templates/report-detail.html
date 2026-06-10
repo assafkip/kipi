@@ -1,0 +1,166 @@
+{% extends "_layout.html" %}
+{% block title %}{{ report.title }} · report{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto">
+  <a href="/reports" class="text-xs text-ink-muted hover:text-accent">← Reports</a>
+
+  <!-- Header -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4 mt-2">
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold break-words">{{ report.title }}</h1>
+        <div class="mt-2 flex items-center gap-2 flex-wrap text-sm text-ink-muted">
+          <span class="role-pill role-source">{{ report.source_type }}</span>
+          {% if report.investigation %}<span class="font-mono text-accent">{{ report.investigation }}</span>{% endif %}
+          <span>· {{ entities|length }} entities · {{ asset_count }} pages</span>
+          <span class="text-ink-faint">· ingested {{ report.ingested_at }}</span>
+        </div>
+      </div>
+      <div class="shrink-0 flex items-center gap-2" x-data="{ confirming: false, busy: false, moving: false, moveTo: '', moveErr: '' }">
+        <a href="/sources?report_id={{ report.id }}"
+           class="text-xs px-3 py-1.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent/60">
+          Read the pages →
+        </a>
+        <!-- Move to another case (wrong-case fix) -->
+        <button x-show="!moving && !confirming" @click="moving = true"
+                class="text-xs px-3 py-1.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent/60">
+          Move to case
+        </button>
+        <template x-if="moving">
+          <span class="flex items-center gap-1.5">
+            <select x-model="moveTo"
+                    class="text-xs bg-bg-soft border border-bg-border rounded px-2 py-1 text-ink">
+              <option value="">Pick a case…</option>
+              {% for c in cases %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+            </select>
+            <button :disabled="busy || !moveTo"
+                    @click="busy = true; moveErr = ''; fetch('/api/report/{{ report.id }}/move', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({case: moveTo}) }).then(r => r.json()).then(d => { if (d.error) { moveErr = d.error; busy = false; } else { window.location = '/reports/{{ report.id }}'; } })"
+                    class="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-40">
+              <span x-show="!busy">Move</span><span x-show="busy" x-cloak>…</span>
+            </button>
+            <button @click="moving = false; moveErr = ''" class="text-xs px-2 py-1 text-ink-muted hover:text-ink">Cancel</button>
+            <span x-show="moveErr" x-cloak x-text="moveErr" class="text-xs text-sev-high"></span>
+          </span>
+        </template>
+        <button x-show="!confirming && !moving" @click="confirming = true"
+                class="text-xs px-3 py-1.5 rounded border border-bg-border text-ink-muted hover:text-sev-high hover:border-sev-high/60">
+          Delete
+        </button>
+        <template x-if="confirming">
+          <span class="flex items-center gap-1.5">
+            <span class="text-xs text-ink-muted">Remove completely?</span>
+            <button :disabled="busy" @click="busy = true; fetch('/api/report/{{ report.id }}/delete', { method: 'POST' }).then(r => r.json()).then(d => { window.location = '/reports'; })"
+                    class="text-xs px-2.5 py-1 rounded bg-sev-high text-white hover:opacity-90 disabled:opacity-50">
+              <span x-show="!busy">Delete</span><span x-show="busy" x-cloak>…</span>
+            </button>
+            <button @click="confirming = false" class="text-xs px-2 py-1 text-ink-muted hover:text-ink">Cancel</button>
+          </span>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report notes: autosave, attributed -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4"
+       x-data="reportNotes()" x-init="init()">
+    <script type="application/json" id="report-notes-data">{{ {'notes': report_notes or ''} | tojson }}</script>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm uppercase tracking-wider text-ink-muted">
+        Your notes on this report{% if report_notes and notes_author %}<span class="ml-2 text-[10px] normal-case text-ink-muted">by {{ notes_author }}</span>{% endif %}
+      </h2>
+      <button x-show="!editing" @click="startEdit()"
+              class="text-xs px-3 py-1.5 rounded border border-accent/60 text-accent font-medium hover:bg-accent hover:text-white"
+              x-text="notes ? '✎ Edit notes' : '+ Add notes'"></button>
+    </div>
+    <div x-show="!editing && notes" x-html="renderMd(notes)" class="markdown text-sm"></div>
+    <div x-show="!editing && !notes" x-cloak class="text-sm text-ink-muted italic">
+      No notes yet. Your read on this report — what it gets right, what it misses, what you trust.
+    </div>
+    <div x-show="editing" x-cloak>
+      <textarea x-model="draft" rows="6" placeholder="Your assessment of this report…"
+                @input="queueSave()" @blur="save(false)"
+                class="w-full bg-bg-soft border border-bg-border rounded p-3 text-sm leading-relaxed"></textarea>
+      <div class="flex items-center gap-2 mt-2">
+        <button @click="save()" class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">Done</button>
+        <span class="text-xs text-ink-faint" x-text="status"></span>
+        <span class="text-xs text-ink-faint ml-auto">Autosaves as you type.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Your overrides that contradict this report -->
+  {% if overrides %}
+  <div class="bg-bg-card border border-accent/40 rounded-lg p-5 mb-4">
+    <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-1">Your calls on this report's actors</h2>
+    <p class="text-xs text-ink-muted mb-3">Where you've overridden what the data implied. Your call stands; the original is kept for audit.</p>
+    <div class="space-y-1.5">
+      {% for o in overrides %}
+      <div class="flex items-center gap-2 text-sm">
+        <span class="text-[10px] uppercase px-1.5 py-0.5 rounded bg-accent/20 text-accent font-medium">override</span>
+        <a href="/entity/{{ o.entity_id }}" class="font-mono hover:text-accent">{{ o.canonical_name }}</a>
+        <span class="text-ink-muted font-mono text-xs">{{ o.predicate }}</span>
+        <span class="text-ink">= {{ o.value }}</span>
+        {% if o.author %}<span class="text-xs text-ink-faint">by {{ o.author }}</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Entities in this report — open one to assert / override -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-5">
+    <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-1">Entities in this report</h2>
+    <p class="text-xs text-ink-muted mb-3">Open an actor to contradict the report — set the role, sub-role, or any attribute. Your call propagates everywhere.</p>
+    {% if entities %}
+    <div class="divide-y divide-bg-border">
+      {% for e in entities %}
+      <a href="/entity/{{ e.id }}" class="flex items-center gap-2 py-2 text-sm hover:bg-bg-soft -mx-2 px-2 rounded">
+        <span class="role-pill role-{{ e.role or '' }}">{{ e.role or e.entity_type }}</span>
+        {% if e.sub_role %}<span class="sub-role-pill sub-role-{{ e.sub_role }}">{{ e.sub_role }}</span>{% endif %}
+        <span class="font-mono text-ink">{{ e.canonical_name }}</span>
+        <span class="ml-auto text-xs text-ink-faint num">{% if e.threat_score %}score {{ '%d'|format(e.threat_score) }}{% endif %}</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-sm text-ink-muted italic">No entities extracted from this report.</div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+function reportNotes() {
+  return {
+    notes: '', editing: false, draft: '', status: '', timer: null,
+    init() { this.notes = JSON.parse(document.getElementById('report-notes-data').textContent).notes || ''; },
+    startEdit() { this.draft = this.notes; this.status = ''; this.editing = true; },
+    queueSave() {
+      this.status = 'saving…';
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.save(false), 800);
+    },
+    async save(collapse = true) {
+      clearTimeout(this.timer);
+      await fetch('/api/report/{{ report.id }}/notes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: this.draft }),
+      });
+      this.notes = this.draft;
+      this.status = 'saved ✓';
+      if (collapse) this.editing = false;
+    },
+  };
+}
+function renderMd(md) {
+  if (!md) return '';
+  let h = md.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  h = h.replace(/(?:^[-*] .+(?:\n|$))+/gm, b =>
+    '<ul>' + b.trim().split('\n').map(l => `<li>${l.replace(/^[-*] /, '')}</li>`).join('') + '</ul>');
+  h = h.split(/\n{2,}/).map(p =>
+    /^<(ul|ol|h\d|blockquote)/.test(p.trim()) ? p : (p.trim() ? `<p>${p.replace(/\n/g, '<br>')}</p>` : '')
+  ).join('');
+  return h;
+}
+</script>
+{% endblock %}

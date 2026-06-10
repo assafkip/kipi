@@ -1,0 +1,89 @@
+{% extends "_layout.html" %}
+{% block title %}Briefs · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="briefsView()" x-init="load()" class="max-w-5xl mx-auto">
+  {% include "_output_views.html" %}
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-semibold">Grouped relatedness briefs</h1>
+      <div class="text-xs text-ink-muted">Each brief covers reports the system found connected. Standalone = no significant overlap.</div>
+    </div>
+    <div class="text-xs text-ink-muted">Generated during Process</div>
+  </div>
+
+  <div x-show="data?.groups?.length === 0 && !data?.standalone" class="bg-bg-card border border-bg-border rounded-lg p-6 text-center text-ink-muted">
+    No briefs yet. Run <strong>Process</strong> on the case to generate them.
+  </div>
+
+  <!-- Groups -->
+  <template x-for="g in (data?.groups || [])" :key="g.name">
+    <a :href="'/briefs/' + g.name" class="block bg-bg-card border border-bg-border rounded-lg p-4 mb-3 hover:border-accent">
+      <div class="flex items-center justify-between mb-2">
+        <div class="font-semibold" x-text="briefTitle(g.content)"></div>
+        <span class="text-[10px] px-2 py-0.5 rounded uppercase"
+              :class="briefVerdictClass(g.content)"
+              x-text="briefVerdict(g.content)"></span>
+      </div>
+      <div class="text-xs text-ink-muted" x-text="briefSummaryPreview(g.content)"></div>
+      <div class="text-xs text-ink-muted mt-2" x-text="briefReports(g.content)"></div>
+    </a>
+  </template>
+
+  <!-- Standalone -->
+  <a href="/briefs/standalone" x-show="data?.standalone" class="block bg-bg-card border border-bg-border rounded-lg p-4 hover:border-accent">
+    <div class="flex items-center justify-between mb-2">
+      <div class="font-semibold">Standalone reports</div>
+      <span class="text-[10px] px-2 py-0.5 rounded uppercase bg-gray-500/15 text-ink-muted">no significant overlap</span>
+    </div>
+    <div class="text-xs text-ink-muted" x-text="standalonePreview()"></div>
+  </a>
+</div>
+
+<script>
+function briefsView() {
+  return {
+    data: null,
+
+    async load() {
+      this.data = await fetch('/api/briefs').then(r => r.json());
+    },
+
+    briefTitle(content) {
+      const m = content.match(/^# (.+)$/m);
+      return m ? m[1] : 'Brief';
+    },
+
+    briefVerdict(content) {
+      const m = content.match(/\*\*Relatedness verdict:\*\* (\w+)/);
+      return m ? m[1] : 'unknown';
+    },
+
+    briefVerdictClass(content) {
+      const v = this.briefVerdict(content);
+      if (v === 'strong') return 'bg-green-500/15 text-conf-high';
+      if (v === 'weak') return 'bg-yellow-500/15 text-sev-med';
+      if (v === 'disjoint') return 'bg-red-500/15 text-sev-high';
+      return 'bg-gray-500/15 text-ink-muted';
+    },
+
+    briefSummaryPreview(content) {
+      const m = content.match(/## Summary\n\n([\s\S]+?)(\n\n##|$)/);
+      if (!m) return '';
+      return m[1].slice(0, 280) + (m[1].length > 280 ? '…' : '');
+    },
+
+    briefReports(content) {
+      const m = content.match(/\*\*Reports in group:\*\* (\d+)/);
+      const w = content.match(/\*\*Time window:\*\* (.+)/);
+      return (m ? m[1] + ' reports' : '') + (w ? ' · ' + w[1] : '');
+    },
+
+    standalonePreview() {
+      const c = this.data?.standalone || '';
+      const lines = c.split('\n').filter(l => l.startsWith('- '));
+      return `${lines.length} report${lines.length === 1 ? '' : 's'} with no significant overlap`;
+    },
+  };
+}
+</script>
+{% endblock %}

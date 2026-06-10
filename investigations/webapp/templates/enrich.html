@@ -1,0 +1,338 @@
+{% extends "_layout.html" %}
+{% block title %}OSINT enrichment · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="enrichView()" x-init="init()" class="max-w-7xl mx-auto">
+
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-semibold">OSINT enrichment</h1>
+      <div class="text-xs text-ink-muted">Enrichment runs OSINT tools (whois, DNS, search, threat-intel) on an entity to pull more about it. Pick the tools to run — the free ones work out of the box; some need an API key.</div>
+    </div>
+    <div class="text-sm text-ink-muted" x-show="stats">
+      <span class="font-mono" x-text="stats?.summary?.run_count || 0"></span> runs ·
+      <span class="font-mono">$<span x-text="(stats?.summary?.total_cost || 0).toFixed(4)"></span></span> spent ·
+      <span class="font-mono" x-text="stats?.summary?.distinct_entities || 0"></span> entities enriched
+    </div>
+  </div>
+
+  <!-- Provider catalog -->
+  <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">Available providers (<span x-text="providers.length"></span>)</h2>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-6">
+    <template x-for="p in providers" :key="p.slug">
+      <div class="bg-bg-card border border-bg-border rounded-lg p-4"
+           :class="p.configured ? '' : 'opacity-70'">
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2">
+            <span class="font-mono font-semibold" x-text="p.display_name"></span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded uppercase"
+                  :class="p.configured ? 'bg-green-500/15 text-conf-high' : 'bg-gray-500/15 text-ink-muted'"
+                  x-text="p.configured ? 'configured' : 'not configured'"></span>
+          </div>
+          <span class="text-[10px] px-1.5 py-0.5 bg-bg-soft text-ink-muted rounded uppercase" x-text="p.category"></span>
+        </div>
+        <div class="text-xs text-ink-muted mb-3" x-text="p.description"></div>
+        <div class="text-xs text-ink-muted mb-3 font-mono">
+          <span x-text="'$' + (p.cost_estimate_usd ?? 0).toFixed(3) + '/call'"></span>
+          ·
+          <span x-text="p.env_var"></span>
+          <a :href="p.docs_url" target="_blank" class="text-accent hover:text-accent-hover ml-2">docs ↗</a>
+        </div>
+
+        <!-- API key configuration -->
+        <div class="bg-bg-soft/50 border border-bg-border rounded p-2 mb-3">
+          <div class="flex items-center justify-between mb-1.5">
+            <span class="text-[10px] uppercase tracking-wider text-ink-muted">API key</span>
+            <span class="text-[10px]"
+                  :class="p.key_source === 'none' ? 'text-ink-muted' : 'text-conf-high'"
+                  x-text="p.key_source === 'db' ? '● saved locally' : (p.key_source === 'env' ? '● from env var' : '○ not set')"></span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input :type="state[p.slug].showKey ? 'text' : 'password'"
+                   x-model="state[p.slug].keyInput"
+                   :placeholder="p.key_source === 'db' ? 'key saved ••••• — type to replace' : (p.key_source === 'env' ? 'using env var — type to override' : 'paste API key…')"
+                   class="bg-bg-soft border border-bg-border rounded px-2 py-1 text-xs flex-1 min-w-[140px] font-mono"
+                   @keydown.enter="saveKey(p)">
+            <button @click="state[p.slug].showKey = !state[p.slug].showKey" type="button"
+                    class="text-[10px] text-ink-muted hover:text-ink px-1 w-8"
+                    x-text="state[p.slug].showKey ? 'hide' : 'show'"></button>
+            <button @click="saveKey(p)"
+                    :disabled="state[p.slug].savingKey || !state[p.slug].keyInput"
+                    class="text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed">
+              <span x-show="!state[p.slug].savingKey">Save</span>
+              <span x-show="state[p.slug].savingKey">…</span>
+            </button>
+            <button x-show="p.key_source === 'db'" @click="clearKey(p)" type="button"
+                    class="text-xs px-2 py-1 text-sev-high hover:text-sev-high">Clear</button>
+          </div>
+          <div x-show="state[p.slug].keyMsg" class="text-[10px] mt-1"
+               :class="state[p.slug].keyErr ? 'text-sev-high' : 'text-conf-high'"
+               x-text="state[p.slug].keyMsg"></div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <select x-model="state[p.slug].mode"
+                  class="bg-bg-soft border border-bg-border rounded px-2 py-1 text-xs">
+            <template x-for="m in p.modes" :key="m">
+              <option :value="m" x-text="m"></option>
+            </template>
+          </select>
+          <input type="text" x-model="state[p.slug].query"
+                 :placeholder="'query / URL / handle…'"
+                 class="bg-bg-soft border border-bg-border rounded px-3 py-1 text-xs flex-1 min-w-[180px]">
+          <button @click="runQuery(p)"
+                  :disabled="!p.configured || !state[p.slug].query || state[p.slug].busy"
+                  class="text-xs px-3 py-1 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+            <span x-show="!state[p.slug].busy">Run</span>
+            <span x-show="state[p.slug].busy">Running…</span>
+          </button>
+        </div>
+        <div x-show="state[p.slug].lastResult" class="mt-3 text-xs">
+          <div x-show="state[p.slug].lastResult?.status === 'success'" class="text-conf-high">
+            ✓ Run #<span x-text="state[p.slug].lastResult?.run_id"></span> ·
+            <span x-text="state[p.slug].lastResult?.result_count"></span> results ·
+            $<span x-text="(state[p.slug].lastResult?.cost_usd || 0).toFixed(4)"></span>
+          </div>
+          <div x-show="state[p.slug].lastResult?.status === 'error'" class="text-sev-high">
+            ✗ <span x-text="state[p.slug].lastResult?.error"></span>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Recent runs -->
+  <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">Recent runs</h2>
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-4 py-2 w-12">#</th>
+          <th class="text-left px-4 py-2">Provider</th>
+          <th class="text-left px-4 py-2">Query</th>
+          <th class="text-left px-4 py-2">Status</th>
+          <th class="text-left px-4 py-2">Entity</th>
+          <th class="text-right px-4 py-2">Cost</th>
+          <th class="text-left px-4 py-2">When</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        <template x-for="run in runs" :key="run.id">
+          <tr class="hover:bg-bg-soft cursor-pointer" @click="openRun(run)">
+            <td class="px-4 py-2 font-mono text-ink-muted" x-text="'#' + run.id"></td>
+            <td class="px-4 py-2 font-mono" x-text="run.provider_slug + (run.mode ? ' · ' + run.mode : '')"></td>
+            <td class="px-4 py-2 truncate max-w-md" x-text="run.query"></td>
+            <td class="px-4 py-2">
+              <span class="text-xs px-2 py-0.5 rounded"
+                    :class="run.status === 'success' ? 'bg-green-500/15 text-conf-high' :
+                            run.status === 'error' ? 'bg-red-500/15 text-sev-high' :
+                            'bg-yellow-500/15 text-sev-med'"
+                    x-text="run.status"></span>
+            </td>
+            <td class="px-4 py-2 font-mono text-xs text-ink-muted">
+              <template x-if="run.entity_id">
+                <a :href="'/entity/' + run.entity_id" @click.stop x-text="'#' + run.entity_id"></a>
+              </template>
+              <template x-if="!run.entity_id"><span class="text-ink-faint">—</span></template>
+            </td>
+            <td class="px-4 py-2 text-right font-mono text-xs">$<span x-text="(run.cost_usd || 0).toFixed(4)"></span></td>
+            <td class="px-4 py-2 text-xs text-ink-muted font-mono" x-text="run.started_at"></td>
+          </tr>
+        </template>
+        <tr x-show="runs.length === 0">
+          <td colspan="7" class="text-center py-6 text-ink-muted">No enrichment runs yet.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Run detail modal -->
+  <div x-show="selectedRun" x-cloak @click.self="selectedRun = null"
+       class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-8"
+       @keydown.escape.window="selectedRun = null">
+    <div class="bg-bg-card border border-bg-border rounded-lg max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between p-3 border-b border-bg-border">
+        <div>
+          <div class="text-sm font-mono font-semibold">Run #<span x-text="selectedRun?.id"></span> · <span x-text="selectedRun?.provider_slug"></span></div>
+          <div class="text-xs text-ink-muted" x-text="selectedRun?.query"></div>
+        </div>
+        <button @click="selectedRun = null" class="text-ink-muted hover:text-ink text-xl px-2">✕</button>
+      </div>
+      <div class="flex-1 overflow-auto p-4 space-y-3">
+        <template x-for="r in (selectedRun?.results || [])" :key="r.id">
+          <div class="bg-bg-soft border border-bg-border rounded p-3">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-[10px] px-1.5 py-0.5 bg-accent/15 text-accent rounded uppercase" x-text="r.result_type"></span>
+              <span class="text-[10px]" :class="'conf-' + (r.confidence || 'medium')" x-text="r.confidence || 'med'"></span>
+            </div>
+            <div class="font-medium text-sm" x-text="r.title"></div>
+            <div class="text-xs text-ink mt-1 whitespace-pre-wrap" x-text="r.summary"></div>
+            <a :href="r.url" target="_blank" x-show="r.url" class="text-xs text-accent hover:underline mt-1 inline-block" x-text="r.url"></a>
+
+            <!-- Large-result decision: never cap evidence — the analyst chooses what to materialize. -->
+            <template x-if="r._raw && r._raw.needs_decision && !r.decision">
+              <div class="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/40 text-xs">
+                <div class="font-semibold text-amber-300 mb-1">
+                  ⚠ Large result — <span x-text="r._raw.counterparty_count || r._raw.count || '?'"></span> items.
+                  Nothing dropped (full set captured). What do you want to do?
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button @click="decide(r,'cluster')" :disabled="r._deciding"
+                    class="px-2 py-1 rounded bg-accent/20 text-accent hover:bg-accent/30 disabled:opacity-50">Open in new cluster</button>
+                  <button @click="decide(r,'subset')" :disabled="r._deciding"
+                    class="px-2 py-1 rounded bg-bg-soft border border-bg-border hover:border-accent">Pick a subset</button>
+                  <button @click="decide(r,'reason')" :disabled="r._deciding"
+                    class="px-2 py-1 rounded bg-bg-soft border border-bg-border hover:border-accent">Reason on it</button>
+                  <button @click="decide(r,'revert')" :disabled="r._deciding"
+                    class="px-2 py-1 rounded bg-bg-soft border border-bg-border text-ink-muted hover:text-red-400 hover:border-red-400/50">Revert</button>
+                </div>
+              </div>
+            </template>
+            <div x-show="r._decideMsg" class="mt-2 text-xs text-accent" x-text="r._decideMsg"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function enrichView() {
+  return {
+    providers: [], runs: [], stats: null,
+    selectedRun: null,
+    state: {},
+
+    async init() {
+      await this.loadProviders();
+      await this.loadRuns();
+      await this.loadStats();
+    },
+
+    async loadProviders() {
+      const d = await fetch('/api/enrich/providers').then(r => r.json());
+      this.providers = d.providers || [];
+      for (const p of this.providers) {
+        if (!this.state[p.slug]) {
+          this.state[p.slug] = {
+            mode: (p.modes && p.modes[0]) || '', query: '', busy: false, lastResult: null,
+            keyInput: '', showKey: false, savingKey: false, keyMsg: '', keyErr: false,
+          };
+        }
+      }
+    },
+
+    async saveKey(p) {
+      const s = this.state[p.slug];
+      const k = (s.keyInput || '').trim();
+      if (!k) { s.keyErr = true; s.keyMsg = 'Enter a key.'; return; }
+      s.savingKey = true; s.keyMsg = ''; s.keyErr = false;
+      try {
+        const resp = await fetch('/api/enrich/providers/' + p.slug + '/key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: k }),
+        });
+        const d = await resp.json();
+        if (d.error) { s.keyErr = true; s.keyMsg = d.error; }
+        else { s.keyMsg = d.configured ? 'Saved. Provider ready.' : 'Saved.'; s.keyInput = ''; }
+      } catch (e) {
+        s.keyErr = true; s.keyMsg = String(e);
+      } finally {
+        s.savingKey = false;
+        await this.loadProviders();  // refresh configured + key_source pills
+      }
+    },
+
+    async clearKey(p) {
+      const s = this.state[p.slug];
+      s.savingKey = true; s.keyMsg = ''; s.keyErr = false;
+      try {
+        const resp = await fetch('/api/enrich/providers/' + p.slug + '/key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: '' }),
+        });
+        const d = await resp.json();
+        if (d.error) { s.keyErr = true; s.keyMsg = d.error; }
+        else { s.keyMsg = 'Key cleared.'; s.keyInput = ''; }
+      } catch (e) {
+        s.keyErr = true; s.keyMsg = String(e);
+      } finally {
+        s.savingKey = false;
+        await this.loadProviders();
+      }
+    },
+
+    async loadRuns() {
+      const d = await fetch('/api/enrich/history?limit=50').then(r => r.json());
+      this.runs = d.runs || [];
+    },
+
+    async loadStats() {
+      const d = await fetch('/api/enrich/stats').then(r => r.json());
+      this.stats = d;
+    },
+
+    async runQuery(p) {
+      const s = this.state[p.slug];
+      s.busy = true;
+      s.lastResult = null;
+      try {
+        const resp = await fetch('/api/enrich/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: p.slug, query: s.query, mode: s.mode }),
+        });
+        s.lastResult = await resp.json();
+      } catch (e) {
+        s.lastResult = { status: 'error', error: String(e) };
+      } finally {
+        s.busy = false;
+        await this.loadRuns();
+        await this.loadStats();
+      }
+    },
+
+    openRun(run) {
+      fetch('/api/enrich/run/' + run.id).then(r => r.json()).then(d => {
+        // Pre-parse raw_json so the template can read needs_decision without re-parsing.
+        (d.results || []).forEach(r => {
+          try { r._raw = JSON.parse(r.raw_json || '{}'); } catch { r._raw = {}; }
+        });
+        this.selectedRun = { ...d.run, results: d.results };
+      });
+    },
+
+    // Volume decision on a large result. We never cap evidence — the full set is in
+    // raw_json; the analyst picks: revert / open in a new cluster / subset / reason.
+    async decide(r, action) {
+      const body = { action };
+      if (action === 'subset') {
+        const n = parseInt(prompt('How many of the ' + (r._raw.counterparty_count || 0) +
+                                  ' items should I materialize into a cluster?'), 10);
+        if (!n || n < 1) return;
+        body.subset = n;
+      }
+      if (action === 'revert' &&
+          !confirm('Discard this result? The captured data will be removed.')) return;
+      r._deciding = true;
+      try {
+        const d = await fetch('/api/enrich/result/' + r.id + '/decide', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(res => res.json());
+        if (d.error) { alert(d.error); return; }
+        r.decision = action === 'revert' ? 'reverted'
+                   : action === 'cluster' || action === 'subset' ? ('cluster:' + d.cluster_id)
+                   : 'reason';
+        r._decideMsg = action === 'reverted' || action === 'revert' ? 'Reverted.'
+                     : d.cluster_name ? ('Opened cluster "' + d.cluster_name + '" (' + d.added + ' nodes).')
+                     : 'Kept as evidence.';
+        await this.loadRuns();
+        await this.loadStats();
+      } finally { r._deciding = false; }
+    },
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "_layout.html" %}
+{% block title %}Exports · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto">
+  {% include "_output_views.html" %}
+  <h1 class="text-xl font-semibold mb-4">Exports</h1>
+
+  <a href="/report" class="block bg-accent/10 border border-accent/40 rounded-lg p-4 mb-6 hover:bg-accent/15">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="font-semibold text-accent">Branded client report →</h3>
+        <p class="text-sm text-ink">Print-ready, client-ready PDF. Pick branding + sections per client. Not a raw dump.</p>
+      </div>
+      <span class="text-2xl">📄</span>
+    </div>
+  </a>
+
+  <p class="text-sm text-ink-muted mb-3">Operational handoff formats (raw), generated during Process.</p>
+
+  <div class="space-y-3">
+    <div class="bg-bg-card border border-bg-border rounded-lg p-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-semibold">STIX 2.1 bundle</h3>
+          <p class="text-sm text-ink-muted">Share intel with peer organizations via OASIS standard.</p>
+        </div>
+        <code class="text-xs bg-bg-soft px-2 py-1 rounded">investigations/exports/stix_bundle.json</code>
+      </div>
+    </div>
+    <div class="bg-bg-card border border-bg-border rounded-lg p-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-semibold">MISP event</h3>
+          <p class="text-sm text-ink-muted">Import into MISP for collaborative threat intelligence.</p>
+        </div>
+        <code class="text-xs bg-bg-soft px-2 py-1 rounded">investigations/exports/misp_event.json</code>
+      </div>
+    </div>
+    <div class="bg-bg-card border border-bg-border rounded-lg p-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-semibold">CSV (entities, relationships, clusters)</h3>
+          <p class="text-sm text-ink-muted">Drop into Notion, Sheets, or Excel for pivot analysis.</p>
+        </div>
+        <code class="text-xs bg-bg-soft px-2 py-1 rounded">investigations/exports/csv/</code>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

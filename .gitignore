@@ -1,0 +1,71 @@
+# Secrets and local overrides
+.env
+*.env
+.claude/settings.local.json
+CLAUDE.local.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output (generated daily, don't commit)
+q-system/output/*.html
+q-system/output/*.json
+q-system/output/*.log
+q-system/output/drafts/*
+q-system/output/lead-gen/*
+q-system/output/design-partner/*
+q-system/output/content-intel/*
+q-system/output/investor-updates/*
+q-system/output/marketing/linkedin/*
+!**/.gitkeep
+
+# Plans (auto-created by Claude Code)
+.claude/plans/
+
+# Session transcripts
+*.jsonl
+
+# SQLite databases (generated at runtime)
+*.db
+
+# Generated sites and build output
+sites/
+template-repo/
+
+# Bus data (daily pipeline, ephemeral)
+q-system/.q-system/agent-pipeline/bus/
+
+# Obsidian vault config (user-specific, not committed)
+q-system/.obsidian/
+
+# Raw source transcripts (instance-specific, 90-day retention)
+q-system/sources/*.md
+
+# Pruned markdown archives (historical, not loaded in context)
+q-system/memory/archives/
+
+# Node
+node_modules/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# prd-os runtime state (per plugins/prd-os/skills/prd-os/SKILL.md: never committed)
+.claude/state/active-prd.json
+.claude/state/active-issue.json
+.claude/state/prdos-stop-gate-firings.json
+data/*.db
+
+# kipi-investigations generated artifacts + ingested data (not source)
+investigations/assets/
+investigations/vault/
+investigations/reports/
+investigations/exports/
+investigations/inbox/
+investigations/data/
+investigations/seeds/
+.playwright-mcp/
+investigations/agent/.mcp-runtime.json

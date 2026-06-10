@@ -1,0 +1,756 @@
+{% extends "_layout.html" %}
+{% block title %}{{ entity.canonical_name }} · entity{% endblock %}
+{% block content %}
+<div class="max-w-7xl mx-auto">
+  <!-- Header -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4">
+    <div class="flex items-start justify-between">
+      <div>
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <span class="role-pill role-{{ entity.role or '' }}">{{ entity.role or entity.entity_type }}</span>
+          {% if analyst_overrides.get('role') %}
+          <span class="text-[10px] px-1.5 py-0.5 bg-accent/20 text-accent rounded font-medium" title="role set by the analyst — overrides the report">analyst override · {{ analyst_overrides['role'] }}</span>
+          {% endif %}
+          {% if entity.sub_role %}
+          <span class="sub-role-pill sub-role-{{ entity.sub_role }}" title="{{ entity.sub_role_reason or '' }}">{{ entity.sub_role }}</span>
+          {% if analyst_overrides.get('sub_role') %}
+          <span class="text-[10px] px-1.5 py-0.5 bg-accent/20 text-accent rounded font-medium" title="sub-role set by the analyst">override · {{ analyst_overrides['sub_role'] }}</span>
+          {% endif %}
+          {% endif %}
+          {% if entity.case_type %}
+          <span class="text-xs px-1.5 py-0.5 bg-accent/10 text-accent rounded font-medium" title="case schema type">{{ entity.case_type }}</span>
+          <span class="text-xs text-ink-faint">{{ entity.entity_type }}</span>
+          {% else %}
+          <span class="text-xs text-ink-muted">{{ entity.entity_type }}</span>
+          {% endif %}
+          {% if seed %}
+          <span class="text-xs px-2 py-0.5 bg-red-500/15 text-sev-high border border-red-500/40 rounded" title="{{ seed.label or '' }}">SEED · prior weight {{ '%.1f'|format(seed.weight or 1.0) }}</span>
+          {% endif %}
+        </div>
+        <h1 class="text-2xl font-mono font-semibold break-all">{{ entity.canonical_name }}</h1>
+        {% if entity.sub_role_reason %}
+        <div class="mt-1 text-xs text-ink-muted italic">{{ entity.sub_role_reason }}</div>
+        {% endif %}
+        {% if aliases %}
+        <div class="mt-2 text-sm text-ink-muted">
+          <span class="text-ink-muted">aliases:</span>
+          {% for a in aliases %}<span class="font-mono ml-1">{{ a }}</span>{% if not loop.last %}<span class="text-ink-faint">,</span>{% endif %}{% endfor %}
+        </div>
+        {% endif %}
+        {% if clusters %}
+        <div class="mt-2 flex flex-wrap gap-1">
+          {% for c in clusters %}
+          <a href="/graph?cluster_id={{ c.id }}" class="cluster-chip hover:opacity-80" style="{{ c.id|cluster_style }}">{{ c.name }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if also_in_cases and also_in_cases|length > 1 %}
+        <div class="mt-3 flex items-center flex-wrap gap-1.5">
+          <span class="text-xs text-sev-med font-semibold uppercase tracking-wider">⇄ spans {{ also_in_cases|length }} cases:</span>
+          {% for cs in also_in_cases %}
+          <a href="/select-case/{{ cs }}"
+             class="text-xs font-mono px-2 py-0.5 bg-amber-500/15 text-sev-med border border-amber-500/40 rounded hover:bg-amber-500/25">{{ cs }}</a>
+          {% endfor %}
+        </div>
+        {% elif also_in_cases and also_in_cases|length == 1 %}
+        <div class="mt-3 text-xs text-ink-muted">in case: <a href="/select-case/{{ also_in_cases[0] }}" class="font-mono text-ink-muted hover:text-accent">{{ also_in_cases[0] }}</a></div>
+        {% endif %}
+      </div>
+      <div class="text-right" x-data="{ open: false }">
+        <div class="text-xs text-ink-muted uppercase tracking-wider">attention score</div>
+        <div class="text-3xl font-mono font-bold text-accent">{{ '%d'|format(score.threat_score or 0) }}</div>
+        <div class="text-xs text-ink-muted mt-1">degree {{ score.degree or 0 }} · {{ score.report_count or 0 }} reports</div>
+        <button @click="open = !open" class="text-xs text-ink-muted hover:text-accent mt-1" x-text="open ? 'hide breakdown' : 'show breakdown'"></button>
+        <div x-data="{ flagged: {{ 'true' if entity.flagged else 'false' }}, busy: false }" class="mt-3">
+          <button @click="busy=true; fetch('/api/entity/{{ entity.id }}/flag', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({flagged: !flagged})}).then(r=>r.json()).then(d=>{ flagged=d.flagged; busy=false; if (d.new_alerts) location.href='/alerts'; })"
+                  :disabled="busy"
+                  class="text-xs px-2.5 py-1 rounded border transition"
+                  :class="flagged ? 'bg-red-500/15 text-sev-high border-red-500/40' : 'bg-bg-soft text-ink-muted border-bg-border hover:text-ink'">
+            <span x-show="!flagged">⚑ Flag actor</span>
+            <span x-show="flagged">⚑ Flagged · unflag</span>
+          </button>
+        </div>
+        <a href="/graph?focus={{ entity.id }}"
+           class="mt-2 inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border border-bg-border bg-bg-soft text-ink-muted hover:text-accent hover:border-accent">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="6" r="2.4"/><circle cx="19" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path d="M7 7.2l9.6 1.4M7.3 16.2l1.4-7.8"/></svg>
+          See in graph
+        </a>
+      </div>
+    </div>
+    <div x-data="{ open: false }" x-init="$watch('open', v => {})" class="-mt-2"></div>
+  </div>
+
+  <!-- Score breakdown (collapsible, full width below header) -->
+  {% if score_breakdown %}
+  <details class="bg-bg-card border border-bg-border rounded-lg mb-4">
+    <summary class="px-4 py-2.5 cursor-pointer hover:bg-bg-soft text-sm">
+      <span class="text-ink-muted uppercase tracking-wider text-xs mr-2">Score breakdown</span>
+      <span class="font-mono text-ink">{{ '%d'|format(score_breakdown.computed_total) }}</span>
+      <span class="text-xs text-ink-muted ml-2">= role + reports + degree{% if score_breakdown.prior_pts %} + seed{% endif %}{% if score_breakdown.propagation_d1_pts or score_breakdown.propagation_d2_pts %} + propagation{% endif %}</span>
+    </summary>
+    <div class="px-4 py-3 border-t border-bg-border">
+      <table class="text-sm w-full">
+        <tbody class="divide-y divide-bg-border">
+          <tr>
+            <td class="py-1.5 text-ink-muted">role × 10</td>
+            <td class="py-1.5 text-ink-muted text-xs">{{ score_breakdown.role or '—' }} (weight {{ score_breakdown.role_weight }})</td>
+            <td class="py-1.5 text-right font-mono">{{ score_breakdown.role_pts }}</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 text-ink-muted">reports × 5</td>
+            <td class="py-1.5 text-ink-muted text-xs">{{ score_breakdown.reports }} distinct reports</td>
+            <td class="py-1.5 text-right font-mono">{{ score_breakdown.reports_pts }}</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 text-ink-muted">degree × 1</td>
+            <td class="py-1.5 text-ink-muted text-xs">{{ score_breakdown.degree }} typed relationships</td>
+            <td class="py-1.5 text-right font-mono">{{ score_breakdown.degree_pts }}</td>
+          </tr>
+          {% if score_breakdown.prior_pts %}
+          <tr>
+            <td class="py-1.5 text-sev-high">seed × 30</td>
+            <td class="py-1.5 text-ink-muted text-xs">marked as prior (weight {{ '%.1f'|format(score_breakdown.seed_weight) }})</td>
+            <td class="py-1.5 text-right font-mono text-sev-high">+{{ '%d'|format(score_breakdown.prior_pts) }}</td>
+          </tr>
+          {% endif %}
+          {% if score_breakdown.propagation_d1_pts %}
+          <tr>
+            <td class="py-1.5 text-role-operator">propagation depth 1</td>
+            <td class="py-1.5 text-ink-muted text-xs">direct neighbor of seed(s)</td>
+            <td class="py-1.5 text-right font-mono text-role-operator">+{{ '%d'|format(score_breakdown.propagation_d1_pts) }}</td>
+          </tr>
+          {% endif %}
+          {% if score_breakdown.propagation_d2_pts %}
+          <tr>
+            <td class="py-1.5 text-role-operator">propagation depth 2</td>
+            <td class="py-1.5 text-ink-muted text-xs">two hops from seed(s)</td>
+            <td class="py-1.5 text-right font-mono text-role-operator">+{{ '%d'|format(score_breakdown.propagation_d2_pts) }}</td>
+          </tr>
+          {% endif %}
+          <tr class="border-t-2 border-bg-border">
+            <td class="py-2 font-semibold text-ink">total</td>
+            <td></td>
+            <td class="py-2 text-right font-mono font-bold text-accent">{{ '%d'|format(score_breakdown.computed_total) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      {% if score_breakdown.computed_total != score_breakdown.stored_total %}
+      <div class="text-xs text-ink-muted italic mt-2">
+        Stored score: {{ '%d'|format(score_breakdown.stored_total) }} (re-run Process to resync)
+      </div>
+      {% endif %}
+      <div class="text-xs text-ink-muted mt-3 leading-relaxed">
+        Formula: <code class="text-accent">role×10 + reports×5 + degree×1 + seed×30 + propagation</code>.
+        It's a rank-by-attention signal, not a maliciousness rating.
+      </div>
+    </div>
+  </details>
+  {% endif %}
+
+  <!-- Analyst override: the analyst is the TOP authority. Asserting here
+       supersedes the report/AI value and reprojects into role, graph, scores,
+       and the brief — not a side note. -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4" x-data="assertPanel()">
+    <div class="flex items-center justify-between gap-3">
+      <div>
+        <h2 class="text-sm uppercase tracking-wider text-ink-muted">Your call</h2>
+        <p class="text-xs text-ink-muted mt-0.5">You're the authority. State a fact and it overrides the report — everywhere it's used.</p>
+      </div>
+      <button @click="open = !open"
+              class="shrink-0 text-xs px-3 py-1.5 rounded border border-accent/60 text-accent font-medium hover:bg-accent hover:text-white"
+              x-text="open ? 'Cancel' : 'I disagree / assert'"></button>
+    </div>
+    <div x-show="open" x-cloak class="mt-3 grid sm:grid-cols-2 gap-3">
+      <label class="block text-sm">
+        <span class="text-xs uppercase tracking-wider text-ink-muted">Field</span>
+        <select x-model="kind" @change="onKind()" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm">
+          <option value="role">Role</option>
+          <option value="sub_role">Sub-role</option>
+          <option value="attribute">Other attribute</option>
+        </select>
+      </label>
+      <label class="block text-sm" x-show="kind === 'attribute'">
+        <span class="text-xs uppercase tracking-wider text-ink-muted">Attribute name</span>
+        <input x-model="predicate" placeholder="e.g. location, affiliation, status"
+               class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm">
+      </label>
+      <label class="block text-sm">
+        <span class="text-xs uppercase tracking-wider text-ink-muted">Value</span>
+        <select x-show="kind === 'role'" x-model="value" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm">
+          <template x-for="r in roles" :key="r"><option :value="r" x-text="r"></option></template>
+        </select>
+        <select x-show="kind === 'sub_role'" x-model="value" class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm">
+          <template x-for="r in subRoles" :key="r"><option :value="r" x-text="r"></option></template>
+        </select>
+        <input x-show="kind === 'attribute'" x-model="value" placeholder="your asserted value"
+               class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm">
+      </label>
+      <label class="block text-sm sm:col-span-2">
+        <span class="text-xs uppercase tracking-wider text-ink-muted">Why (optional, kept as evidence)</span>
+        <textarea x-model="rationale" rows="2" placeholder="how you know — direct collection, corroboration, your assessment…"
+                  class="mt-1 w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></textarea>
+      </label>
+      <div class="sm:col-span-2 flex items-center gap-2">
+        <button @click="submit()" :disabled="busy || !value"
+                class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed">
+          Assert — my call wins
+        </button>
+        <span class="text-xs text-ink-faint">Supersedes the report value. The original is kept for audit.</span>
+      </div>
+    </div>
+  </div>
+
+  {% if entity_claims %}
+  <!-- Claims & corrections: provenance behind the graph -->
+  <details class="bg-bg-card border border-bg-border rounded-lg mb-4">
+    <summary class="px-4 py-2.5 cursor-pointer hover:bg-bg-soft text-sm">
+      <span class="text-ink-muted uppercase tracking-wider text-xs mr-2">Claims &amp; corrections</span>
+      <span class="text-ink-muted">{{ entity_claims|selectattr('status','equalto','active')|list|length }} active</span>
+      {% set superseded = entity_claims|selectattr('status','equalto','superseded')|list|length %}
+      {% if superseded %}<span class="text-ink-faint">· {{ superseded }} superseded</span>{% endif %}
+    </summary>
+    <div class="px-4 py-3 border-t border-bg-border space-y-1.5">
+      {% for c in entity_claims %}
+      <div class="flex items-center gap-2 text-sm
+                  {% if c.status == 'superseded' %}opacity-50 line-through{% elif c.status == 'rejected' %}opacity-40{% endif %}">
+        <span class="text-[10px] uppercase px-1.5 py-0.5 rounded
+                     {% if c.status=='active' %}bg-green-500/15 text-conf-high{% elif c.status=='superseded' %}bg-gray-500/15 text-ink-muted{% else %}bg-red-500/15 text-sev-high{% endif %}">{{ c.status }}</span>
+        <span class="text-ink-muted font-mono text-xs">{{ c.predicate }}</span>
+        <span class="text-ink">{{ c.value }}</span>
+        <span class="text-xs ml-auto">
+          {% if c.source == 'manual' %}<span class="text-accent font-medium">analyst{% if c.author %} · {{ c.author }}{% endif %}</span>
+          {% else %}<span class="text-ink-faint">{{ c.report_title or ('report ' ~ c.report_id) }}</span>{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  <div class="grid grid-cols-12 gap-4">
+    <!-- Left: dossier + mentions -->
+    <div class="col-span-12 lg:col-span-8">
+      <!-- Dossier: AI-generated, analyst-editable (override is regen-safe) -->
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4"
+           x-data="dossierEditor()" x-init="init()">
+        <script type="application/json" id="dossier-data">{{ {'ai': dossier_md or '', 'override': dossier_override or ''} | tojson }}</script>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm uppercase tracking-wider text-ink-muted">
+            Analyst dossier
+            <span x-show="hasOverride" x-cloak class="ml-2 text-[10px] px-1.5 py-0.5 bg-accent/20 text-accent rounded normal-case">analyst-edited</span>
+            {% if dossier_override and dossier_author %}<span class="ml-1 text-[10px] text-ink-muted normal-case">by {{ dossier_author }}</span>{% endif %}
+          </h2>
+          <div class="flex items-center gap-2" x-show="!editing">
+            <button @click="startEdit()"
+                    class="text-xs px-3 py-1.5 rounded border border-accent/60 text-accent font-medium hover:bg-accent hover:text-ink">✎ Edit dossier</button>
+            <button x-show="hasOverride" x-cloak @click="revert()" class="text-xs text-ink-muted hover:text-sev-high">Revert to AI</button>
+          </div>
+        </div>
+        <div x-show="!editing" x-html="rendered()" class="markdown text-sm"></div>
+        <div x-show="!editing && !effective()" x-cloak class="text-sm text-ink-muted italic">
+          No dossier yet. Click Edit to write one, or run Process to auto-generate it.
+        </div>
+        <div x-show="editing" x-cloak>
+          <textarea x-model="draft" rows="18"
+                    class="w-full bg-bg-soft border border-bg-border rounded p-3 text-sm font-mono leading-relaxed"></textarea>
+          <div class="flex items-center gap-2 mt-2">
+            <button @click="save()" class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">Save</button>
+            <button @click="editing=false" class="text-xs px-3 py-1.5 text-ink-muted hover:text-ink">Cancel</button>
+            <span class="text-xs text-ink-muted ml-2">Your edits are kept separate — regenerating the AI dossier won't overwrite them.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analyst notes: always preserved, never touched by AI regen -->
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4"
+           x-data="notesEditor()" x-init="init()">
+        <script type="application/json" id="notes-data">{{ {'notes': analyst_notes or ''} | tojson }}</script>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm uppercase tracking-wider text-ink-muted">Analyst notes{% if analyst_notes and notes_author %}<span class="ml-2 text-[10px] text-ink-muted normal-case">by {{ notes_author }}</span>{% endif %}</h2>
+          <button x-show="!editing" @click="startEdit()"
+                  class="text-xs px-3 py-1.5 rounded border border-accent/60 text-accent font-medium hover:bg-accent hover:text-ink"
+                  x-text="notes ? '✎ Edit notes' : '+ Add your notes'"></button>
+        </div>
+        <div x-show="!editing && notes" x-html="renderMd(notes)" class="markdown text-sm"></div>
+        <div x-show="!editing && !notes" x-cloak class="text-sm text-ink-muted italic">
+          No notes yet. The AI won't know everything you know — add what you've got.
+        </div>
+        <div x-show="editing" x-cloak>
+          <textarea x-model="draft" rows="8" placeholder="What do you know that the report didn't say?"
+                    @input="queueSave()" @blur="save(false)"
+                    class="w-full bg-bg-soft border border-bg-border rounded p-3 text-sm leading-relaxed"></textarea>
+          <div class="flex items-center gap-2 mt-2">
+            <button @click="save()" class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">Done</button>
+            <span class="text-xs text-ink-faint" x-text="status"></span>
+            <span class="text-xs text-ink-faint ml-auto">Autosaves as you type.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Connections -->
+      {% if typed_out or typed_in %}
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4">
+        <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">Typed relationships</h2>
+        <div class="space-y-1.5 text-sm">
+          {% for t in typed_out %}
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-ink-muted">[{{ t.confidence or 'med' }}]</span>
+            <span class="text-accent font-medium">{{ t.rel_type }}</span>
+            <span class="text-ink-muted">→</span>
+            <a href="/entity/{{ t.other_id }}" class="font-mono hover:text-accent">{{ t.other_name }}</a>
+            <span class="text-xs text-ink-muted">— {{ t.evidence or '' }}</span>
+          </div>
+          {% endfor %}
+          {% for t in typed_in %}
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-ink-muted">[{{ t.confidence or 'med' }}]</span>
+            <a href="/entity/{{ t.other_id }}" class="font-mono hover:text-accent">{{ t.other_name }}</a>
+            <span class="text-ink-muted">→</span>
+            <span class="text-accent font-medium">{{ t.rel_type }}</span>
+            <span class="text-ink-muted">→</span>
+            <span class="font-mono">this</span>
+            <span class="text-xs text-ink-muted">— {{ t.evidence or '' }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Mentions w/ evidence -->
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5">
+        <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">Mentions ({{ mentions|length }})</h2>
+        <div class="space-y-3">
+          {% for m in mentions %}
+          <div class="border border-bg-border rounded p-3">
+            <div class="flex items-start gap-3">
+              {% if m.vault_image %}
+              <a href="/vault-assets/{{ m.vault_image }}" target="_blank" class="shrink-0">
+                <img src="/vault-assets/{{ m.vault_image }}" class="w-32 h-24 object-cover rounded border border-bg-border hover:border-accent" loading="lazy">
+              </a>
+              {% endif %}
+              <div class="flex-1 min-w-0">
+                <div class="text-xs text-ink-muted mb-1">
+                  {{ m.report_title }}{% if m.page_number %} · page {{ m.page_number }}{% endif %}
+                </div>
+                <div class="text-sm text-ink line-clamp-3">{{ m.context }}</div>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: pivot links -->
+    <div class="col-span-12 lg:col-span-4">
+      <!-- OSINT enrichment runner + history -->
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4"
+           x-data="entityEnrich({{ entity.id }})" x-init="init()">
+        <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">OSINT enrichment</h2>
+
+        <!-- Run form -->
+        <div class="flex flex-col gap-2 mb-4">
+          <div class="flex items-center gap-2">
+            <select x-model="provider" @change="setMode()"
+                    class="bg-bg-soft border border-bg-border rounded px-2 py-1 text-xs flex-1">
+              <template x-for="p in providers" :key="p.slug">
+                <option :value="p.slug" :disabled="!p.configured"
+                        x-text="p.slug + (p.configured ? '' : ' (not configured)')"></option>
+              </template>
+            </select>
+            <select x-model="mode" class="bg-bg-soft border border-bg-border rounded px-2 py-1 text-xs">
+              <template x-for="m in currentModes()" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+          <input type="text" x-model="query"
+                 :placeholder="'query about ' + '{{ entity.canonical_name }}' + '…'"
+                 class="bg-bg-soft border border-bg-border rounded px-3 py-1 text-xs">
+          <button @click="run()"
+                  :disabled="busy || !query || !canRun()"
+                  class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+            <span x-show="!busy">Run enrichment</span>
+            <span x-show="busy">Running…</span>
+          </button>
+          <div x-show="lastError" class="text-xs text-sev-high" x-text="lastError"></div>
+        </div>
+
+        <!-- Autonomous investigator agent -->
+        <div class="border-t border-bg-border pt-3 mb-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-xs font-medium text-ink">Investigate (agent)</div>
+              <div class="text-[11px] text-ink-faint">Runs an OSINT agent: pivots + corroborates, lands findings below for you to promote. A minute or two.</div>
+            </div>
+            <button @click="investigate()" :disabled="invBusy"
+                    class="shrink-0 text-xs px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent/5 disabled:opacity-50 disabled:cursor-not-allowed">
+              <span x-show="!invBusy">🔍 Investigate</span>
+              <span x-show="invBusy" x-cloak>Investigating…</span>
+            </button>
+          </div>
+
+          <!-- Live step trail: streams the agent's real moves as it works. Shows
+               the instant you click (busy) so there's never a blank gap while the
+               agent boots — even before the first line streams in. -->
+          <div x-show="invBusy || invLog.length" x-cloak class="mt-2">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[11px] text-ink-muted">Live activity</span>
+              <span class="text-[11px] text-ink-faint" x-show="invBusy">streaming…</span>
+            </div>
+            <div x-ref="invlog"
+                 class="h-40 overflow-auto rounded border border-bg-border bg-bg-soft px-3 py-2 font-mono text-[11px] leading-relaxed text-ink-muted whitespace-pre-wrap">
+              <div x-show="!invLog.length" class="text-ink-faint">starting the agent… (first step in ~15-30s)</div>
+              <template x-for="(line, i) in invLog" :key="i">
+                <div x-text="line"></div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- Past enrichments -->
+        <div class="border-t border-bg-border pt-3">
+          <div class="text-xs uppercase tracking-wider text-ink-muted mb-2">
+            Past enrichments (<span x-text="runs.length"></span>)
+          </div>
+          <div class="space-y-2 max-h-96 overflow-y-auto">
+            <template x-for="r in runs" :key="r.id">
+              <div class="bg-bg-soft border border-bg-border rounded p-2">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-[10px] px-1.5 py-0.5 bg-accent/15 text-accent rounded uppercase font-mono"
+                        x-text="r.provider_slug + (r.mode ? ' · ' + r.mode : '')"></span>
+                  <span class="text-[10px] font-mono"
+                        :class="r.status === 'success' ? 'text-conf-high' :
+                                r.status === 'error' ? 'text-sev-high' : 'text-sev-med'"
+                        x-text="r.status"></span>
+                </div>
+                <div class="text-xs text-ink mb-1" x-text="r.query"></div>
+                <template x-if="r.proc">
+                  <div class="mb-1">
+                    <button @click="r.procOpen = !r.procOpen" class="text-[10px] text-ink-muted hover:text-accent font-mono">
+                      <span x-text="r.procOpen ? '▾' : '▸'"></span> how it investigated
+                      <span class="text-ink-faint" x-show="r.proc.tools_used && r.proc.tools_used.length"
+                            x-text="'· ' + (r.proc.tools_used || []).join(' · ')"></span>
+                    </button>
+                    <div x-show="r.procOpen" x-cloak class="mt-1 text-[11px] text-ink-muted">
+                      <div x-show="r.proc.summary" x-text="r.proc.summary"></div>
+                      <div x-show="r.proc.narration" class="mt-1 whitespace-pre-wrap bg-bg-soft rounded p-2 max-h-48 overflow-y-auto font-mono leading-relaxed" x-text="r.proc.narration"></div>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="r.results && r.results.length > 0">
+                  <div class="text-[11px] text-ink-muted mt-1 border-t border-bg-border pt-1">
+                    <template x-for="(res, idx) in r.results.slice(0, 3)" :key="res.id">
+                      <div class="mb-1.5">
+                        <span class="font-mono text-accent" x-text="res.title.slice(0, 60)"></span>
+                        <div class="text-ink-muted mt-0.5" x-text="res.summary.slice(0, 200) + (res.summary.length > 200 ? '…' : '')"></div>
+                        <button @click="citeInDossier(res, r)"
+                                class="mt-0.5 text-[10px] text-accent hover:underline">→ cite in dossier</button>
+                      </div>
+                    </template>
+                    <div x-show="r.results.length > 3" class="text-ink-muted" x-text="'+ ' + (r.results.length - 3) + ' more'"></div>
+                  </div>
+                </template>
+                <div class="text-[10px] text-ink-muted mt-1 font-mono" x-text="r.started_at + (r.cost_usd ? ' · $' + r.cost_usd.toFixed(4) : '')"></div>
+              </div>
+            </template>
+            <div x-show="runs.length === 0" class="text-xs text-ink-muted italic">
+              No enrichments yet for this entity.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {% if pivot_links %}
+      <div class="bg-bg-card border border-bg-border rounded-lg p-5 mb-4">
+        <h2 class="text-sm uppercase tracking-wider text-ink-muted mb-3">Pivot URLs (passive)</h2>
+        <div class="space-y-2">
+          {% for l in pivot_links %}
+          <a href="{{ l.url }}" target="_blank" rel="noopener"
+             class="block text-sm bg-bg-soft border border-bg-border rounded px-3 py-2 hover:border-accent hover:text-accent">
+            <div class="flex items-center justify-between">
+              <span>{{ l.label }}</span>
+              <span class="text-ink-muted">↗</span>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<script>
+// minimal markdown rendering — headings, bold, italic, code, lists, links, tables, blockquotes
+function dossierEditor() {
+  return {
+    ai: '', override: '', editing: false, draft: '',
+    init() {
+      const d = JSON.parse(document.getElementById('dossier-data').textContent);
+      this.ai = d.ai || '';
+      this.override = (d.override || '').trim();
+      // Enrichment panel dispatches this to cite a result into the dossier.
+      window.addEventListener('dossier-cite', e => this.appendCitation(e.detail));
+    },
+    get hasOverride() { return !!this.override; },
+    effective() { return this.override || this.ai; },
+    rendered() { return renderMd(this.effective()); },
+    startEdit() { this.draft = this.effective(); this.editing = true; },
+    async save() {
+      await fetch('/api/entity/{{ entity.id }}/dossier', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: this.draft }),
+      });
+      // Optimistic in-place update — no full-page reload.
+      this.override = this.draft.trim();
+      this.editing = false;
+    },
+    async revert() {
+      if (!confirm('Revert to the AI dossier? Your edits will be removed.')) return;
+      await fetch('/api/entity/{{ entity.id }}/dossier/revert', { method: 'POST' });
+      this.override = '';
+      this.editing = false;
+    },
+    // Promotion: an enrichment result gets appended as a cited line, then saved.
+    async appendCitation(text) {
+      if (!text) return;
+      const base = (this.override || this.ai || '').trimEnd();
+      this.draft = (base ? base + '\n\n' : '') + text;
+      await this.save();
+    },
+  };
+}
+function notesEditor() {
+  return {
+    notes: '', editing: false, draft: '', status: '', timer: null,
+    init() { this.notes = JSON.parse(document.getElementById('notes-data').textContent).notes || ''; },
+    startEdit() { this.draft = this.notes; this.status = ''; this.editing = true; },
+    queueSave() {              // debounced autosave while typing — no Save button needed
+      this.status = 'saving…';
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.save(false), 800);
+    },
+    async save(collapse = true) {
+      clearTimeout(this.timer);
+      await fetch('/api/entity/{{ entity.id }}/notes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: this.draft }),
+      });
+      this.notes = this.draft;     // optimistic in-place update, no full reload
+      this.status = 'saved ✓';
+      if (collapse) this.editing = false;
+    },
+  };
+}
+function assertPanel() {
+  return {
+    open: false, busy: false,
+    kind: 'role', predicate: 'role', value: 'operator', rationale: '',
+    roles: ['operator', 'channel', 'ioc', 'infra', 'source', 'noise'],
+    subRoles: ['leadership', 'member', 'facilitator', 'developer', 'defacer',
+               'propagandist', 'recruiter', 'spokesperson', 'infra_provider', 'unknown'],
+    onKind() {
+      if (this.kind === 'role') { this.predicate = 'role'; this.value = 'operator'; }
+      else if (this.kind === 'sub_role') { this.predicate = 'sub_role'; this.value = 'leadership'; }
+      else { this.predicate = ''; this.value = ''; }
+    },
+    async submit() {
+      const predicate = this.kind === 'attribute' ? this.predicate.trim() : this.kind;
+      if (!predicate || !this.value) return;
+      this.busy = true;
+      // role + sub_role are 'role'-type claims (they reproject); the rest are attributes.
+      const claim_type = (this.kind === 'attribute') ? 'attribute' : 'role';
+      try {
+        const r = await fetch('/api/entity/{{ entity.id }}/assert', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ claim_type, predicate, value: this.value, rationale: this.rationale }),
+        });
+        const d = await r.json();
+        if (d.error) { alert('Could not assert: ' + d.error); this.busy = false; return; }
+        location.reload();   // role / score / graph / claims all reflect the override
+      } catch (e) {
+        alert('Could not reach the server.');
+        this.busy = false;
+      }
+    },
+  };
+}
+function renderMd(md) {
+  if (!md) return '';
+  let html = md;
+  // code fences
+  html = html.replace(/```([\s\S]*?)```/g, (m, c) => `<pre class="bg-bg-soft p-3 rounded my-2 overflow-x-auto"><code>${escapeHtml(c)}</code></pre>`);
+  // tables: convert | tables
+  html = html.replace(/(?:^\|.+\|\s*\n)+/gm, (block) => {
+    const rows = block.trim().split('\n').filter(r => r.trim());
+    if (rows.length < 2) return block;
+    const cells = rows.map(r => r.split('|').slice(1, -1).map(c => c.trim()));
+    if (!cells[1].every(c => /^-+:?$/.test(c) || /^:?-+:?$/.test(c))) return block;
+    const headRow = '<tr>' + cells[0].map(c => `<th>${inlineMd(c)}</th>`).join('') + '</tr>';
+    const body = cells.slice(2).map(r => '<tr>' + r.map(c => `<td>${inlineMd(c)}</td>`).join('') + '</tr>').join('');
+    return `<table>${headRow}${body}</table>\n`;
+  });
+  // headings
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // blockquotes
+  html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+  // lists
+  html = html.replace(/^(?:- (.+)(?:\n|$))+/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^- /, ''));
+    return '<ul>' + items.map(i => `<li>${inlineMd(i)}</li>`).join('') + '</ul>\n';
+  });
+  // paragraphs
+  html = html.split('\n\n').map(p => {
+    if (/^<(h\d|ul|ol|blockquote|pre|table)/.test(p.trim())) return p;
+    if (!p.trim()) return '';
+    return `<p>${inlineMd(p)}</p>`;
+  }).join('\n');
+  return html;
+}
+function inlineMd(s) {
+  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" class="text-accent hover:underline">$1</a>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  s = s.replace(/`([^`]+?)`/g, '<code>$1</code>');
+  s = s.replace(/\[([^\]]+?)\]\(([^)]+?)\)/g, '<a href="$2" target="_blank" class="text-accent hover:underline">$1</a>');
+  return s;
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+<script>
+function entityEnrich(entityId) {
+  return {
+    entityId,
+    providers: [],
+    runs: [],
+    provider: '',
+    mode: '',
+    query: '',
+    busy: false,
+    invBusy: false,
+    lastError: '',
+
+    async init() {
+      const d = await fetch('/api/enrich/providers').then(r => r.json());
+      this.providers = d.providers || [];
+      const first = this.providers.find(p => p.configured) || this.providers[0];
+      if (first) {
+        this.provider = first.slug;
+        this.mode = (first.modes && first.modes[0]) || '';
+      }
+      await this.loadRuns();
+      // Resume streaming if an investigator run for this case is already going
+      // (e.g. you navigated away and came back).
+      try {
+        const s = await fetch('/api/investigate/status').then(r => r.json());
+        if (s.status === 'running' &&
+            (s.entity || '') === '{{ entity.canonical_name }}') {
+          this.invBusy = true; this.invLog = s.log || []; this.pollInvestigate();
+        }
+      } catch (e) {}
+    },
+
+    async loadRuns() {
+      const d = await fetch('/api/enrich/history?entity_id=' + this.entityId + '&limit=25').then(r => r.json());
+      this.runs = (d.runs || []).map(r => {
+        r.procOpen = false;
+        try { r.proc = r.agent_process ? JSON.parse(r.agent_process) : null; } catch (e) { r.proc = null; }
+        return r;
+      });
+    },
+
+    currentModes() {
+      const p = this.providers.find(x => x.slug === this.provider);
+      return p ? p.modes : [];
+    },
+
+    setMode() {
+      this.mode = (this.currentModes() || [])[0] || '';
+    },
+
+    // Promote an enrichment result into the analyst dossier (cross-component
+    // via a window event the dossier editor listens for).
+    citeInDossier(res, run) {
+      const title = (res.title || '').trim();
+      const summary = (res.summary || '').trim();
+      const src = run.provider_slug + (run.mode ? ' · ' + run.mode : '');
+      const snippet = `**[${src}]** ${title}${summary ? ' — ' + summary : ''}`;
+      window.dispatchEvent(new CustomEvent('dossier-cite', { detail: snippet }));
+    },
+
+    canRun() {
+      const p = this.providers.find(x => x.slug === this.provider);
+      return p && p.configured;
+    },
+
+    async run() {
+      this.lastError = '';
+      this.busy = true;
+      try {
+        const resp = await fetch('/api/enrich/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: this.provider,
+            mode: this.mode,
+            query: this.query,
+            entity_id: this.entityId,
+          }),
+        });
+        const data = await resp.json();
+        if (data.status === 'error') {
+          this.lastError = data.error || 'enrichment failed';
+        } else {
+          this.query = '';
+        }
+      } catch (e) {
+        this.lastError = String(e);
+      } finally {
+        this.busy = false;
+        await this.loadRuns();
+      }
+    },
+    invLog: [], invTimer: null,
+    async investigate() {
+      this.lastError = '';
+      this.invBusy = true; this.invLog = [];
+      try {
+        const data = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity: '{{ entity.canonical_name }}' }),
+        }).then(r => r.json());
+        if (data.error) { this.lastError = data.error; this.invBusy = false; return; }
+        this.pollInvestigate();   // background job — stream the live step trail
+      } catch (e) {
+        this.lastError = String(e); this.invBusy = false;
+      }
+    },
+    pollInvestigate() {
+      if (this.invTimer) return;
+      this.invTimer = setInterval(async () => {
+        let d;
+        try { d = await fetch('/api/investigate/status').then(r => r.json()); }
+        catch (e) { return; }
+        if (Array.isArray(d.log)) {
+          const grew = d.log.length !== this.invLog.length;
+          this.invLog = d.log;
+          if (grew) this.$nextTick(() => {
+            const box = this.$refs.invlog;
+            if (box) box.scrollTop = box.scrollHeight;
+          });
+        }
+        if (d.status === 'running') return;
+        clearInterval(this.invTimer); this.invTimer = null; this.invBusy = false;
+        if (d.status === 'error') this.lastError = (d.result && d.result.error) || 'investigation failed';
+        await this.loadRuns();
+      }, 1500);
+    },
+  };
+}
+</script>
+{% endblock %}

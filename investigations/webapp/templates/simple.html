@@ -1,0 +1,117 @@
+{% extends "_layout.html" %}
+{% block title %}Quick look · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto mt-10" x-data="quickLook()">
+  <h1 class="text-2xl font-semibold text-ink">Quick look</h1>
+  <p class="text-sm text-ink-muted mt-1.5 leading-relaxed">
+    Drop one thing — a username, domain, wallet, or handle — and the investigator goes
+    out to the open web, digs, and builds the graph. No setup. Watch it work.
+  </p>
+
+  <div class="mt-6 flex gap-2">
+    <input x-model="seed" @keydown.enter="go()" :disabled="busy"
+           placeholder="e.g. trump-2026.io  ·  @suspect  ·  bc1q…"
+           class="flex-1 px-3.5 py-2.5 text-sm bg-bg-card border border-bg-border rounded-lg focus:border-accent outline-none">
+    <button @click="go()" :disabled="busy || !seed.trim()"
+            class="px-4 py-2.5 text-sm bg-accent text-white rounded-lg hover:bg-accent-hover disabled:opacity-50 shrink-0">
+      <span x-show="!busy && !done">Investigate →</span>
+      <span x-show="busy" x-cloak>Working…</span>
+      <span x-show="done" x-cloak>Run another</span>
+    </button>
+  </div>
+  <div x-show="error" x-cloak class="mt-2 text-xs text-sev-high" x-text="error"></div>
+
+  <!-- Live build: progress + the agent's real step trail + tool ticker, right here. -->
+  <div x-show="started" x-cloak class="mt-6 bg-bg-card border border-bg-border rounded-lg p-4">
+    <div class="flex items-center justify-between mb-1.5">
+      <span class="text-sm font-medium text-ink">Investigating <span class="font-mono text-accent" x-text="seedRun"></span></span>
+      <span class="text-xs text-ink-faint" x-show="!done">building…</span>
+      <span class="text-xs text-conf-high" x-show="done">done</span>
+    </div>
+    <template x-if="progress">
+      <div class="mb-2">
+        <div class="flex items-center justify-between text-xs text-ink-muted mb-1">
+          <span x-text="progressLabel()"></span>
+          <span class="num" x-text="progress.findings + ' finding' + (progress.findings === 1 ? '' : 's')"></span>
+        </div>
+        <div class="h-1.5 bg-bg-soft rounded overflow-hidden" x-show="progress.targets_total">
+          <div class="h-full bg-accent transition-all duration-500" :style="'width:' + pct() + '%'"></div>
+        </div>
+      </div>
+    </template>
+    <!-- Tool ticker: the OSINT tools as they fire, pulled from the live trail. -->
+    <div x-show="tools.length" x-cloak class="flex flex-wrap gap-1 mb-2">
+      <template x-for="(t, i) in tools" :key="i">
+        <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-soft text-ink-muted border border-bg-border" x-text="t"></span>
+      </template>
+    </div>
+    <div x-ref="log" class="h-44 overflow-auto rounded border border-bg-border bg-bg-soft px-3 py-2 font-mono text-xs leading-relaxed text-ink-muted whitespace-pre-wrap">
+      <div x-show="!log.length" class="text-ink-faint">starting the agent… (first step in ~15–30s)</div>
+      <template x-for="(line, i) in log" :key="i"><div x-text="line"></div></template>
+    </div>
+    <div x-show="done" x-cloak class="mt-3 flex gap-2">
+      <a :href="'/graph'" class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">View the graph →</a>
+      <a :href="'/runs'" class="text-xs px-3 py-1.5 border border-bg-border rounded hover:bg-bg-soft">Open as full case →</a>
+    </div>
+  </div>
+
+  <div x-show="!started" class="mt-5 text-xs text-ink-faint leading-relaxed">
+    Works with the free OSINT tools out of the box. When it finishes you'll have a graph
+    you can open as a full case.
+  </div>
+</div>
+
+<script>
+function quickLook() {
+  return {
+    seed: '', seedRun: '', busy: false, started: false, done: false, error: '',
+    log: [], progress: null, tools: [], timer: null,
+    pct() { const p = this.progress; return (!p || !p.targets_total) ? 0 : Math.min(100, Math.round(100 * p.targets_done / p.targets_total)); },
+    progressLabel() {
+      const p = this.progress; if (!p) return '';
+      if (p.phase === 'extracting') return 'extracting new artifacts…';
+      if (p.phase === 'planning') return 'planning targets…';
+      if (p.phase === 'starting') return 'starting…';
+      if (p.targets_total) return p.targets_done + ' / ' + p.targets_total + ' targets';
+      return 'investigating…';
+    },
+    async go() {
+      if (!this.seed.trim() || this.busy) return;
+      this.busy = true; this.error = ''; this.done = false; this.log = []; this.tools = []; this.progress = null;
+      this.seedRun = this.seed.trim();
+      try {
+        const d = await fetch('/api/quick-look', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ seed: this.seedRun }),
+        }).then(r => r.json());
+        if (d.error) { this.error = d.error; this.busy = false; return; }
+        this.started = true;
+        this.poll();
+      } catch (e) { this.error = 'Could not start.'; this.busy = false; }
+    },
+    poll() {
+      if (this.timer) return;
+      this.timer = setInterval(async () => {
+        let d;
+        try { d = await fetch('/api/investigate/status').then(r => r.json()); }
+        catch (e) { return; }
+        if (Array.isArray(d.log)) {
+          this.log = d.log;
+          // Pull tool names out of the trail for the ticker (e.g. "Bash ./invctl osint-tool perplexity").
+          const seen = new Set(this.tools);
+          d.log.forEach(l => {
+            const m = l.match(/osint-tool (\w+)|mcp__kipi-osint__(\w+)/);
+            const t = m && (m[1] || m[2]); if (t && !seen.has(t)) { seen.add(t); this.tools.push(t); }
+          });
+          this.$nextTick(() => { const b = this.$refs.log; if (b) b.scrollTop = b.scrollHeight; });
+        }
+        if (d.progress) this.progress = d.progress;
+        if (d.status === 'running') return;
+        clearInterval(this.timer); this.timer = null;
+        this.busy = false; this.done = true;
+      }, 1500);
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,76 @@
+{% extends "_layout.html" %}
+{% block title %}Alerts · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="alertsView()" x-init="load()" class="max-w-5xl mx-auto">
+  {% include "_signals_views.html" %}
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-semibold">Alerts</h1>
+      <p class="text-sm text-ink-muted mt-1">
+        Auto-flagged when a watchlisted actor reappears or an actor crosses into a new case.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-ink-muted flex items-center gap-1">
+        <input type="checkbox" x-model="includeAck" @change="load()"> show acknowledged
+      </label>
+      <button @click="ackAll()" x-show="alerts.some(a => !a.acknowledged)"
+              class="text-xs px-3 py-1.5 bg-bg-card border border-bg-border rounded hover:bg-bg-soft">
+        Acknowledge all
+      </button>
+    </div>
+  </div>
+
+  <div x-show="alerts.length === 0" class="bg-bg-card border border-bg-border rounded-lg p-8 text-center text-ink-muted">
+    No alerts. Flag an actor (on its page) or ingest a report, and watchlist + cross-case hits show up here.
+  </div>
+
+  <div class="space-y-2">
+    <template x-for="a in alerts" :key="a.id">
+      <div class="bg-bg-card border rounded-lg p-3 flex items-start gap-3"
+           :class="a.acknowledged ? 'border-bg-border opacity-50' :
+                   (a.severity === 'high' ? 'border-red-500/50' : a.severity === 'medium' ? 'border-amber-500/40' : 'border-bg-border')">
+        <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded mt-0.5"
+              :class="a.severity === 'high' ? 'bg-red-500/15 text-sev-high' :
+                      a.severity === 'medium' ? 'bg-amber-500/15 text-sev-med' : 'bg-gray-500/15 text-ink-muted'"
+              x-text="a.severity"></span>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm text-ink" x-text="a.message"></div>
+          <div class="text-xs text-ink-muted mt-1 flex items-center gap-2 flex-wrap">
+            <span class="px-1.5 py-0.5 bg-bg-soft rounded" x-text="a.alert_type"></span>
+            <a :href="'/entity/' + a.entity_id" class="font-mono hover:text-accent" x-text="a.canonical_name"></a>
+            <span x-show="a.report_title" class="text-ink-faint">in</span>
+            <span x-show="a.report_title" x-text="a.report_title"></span>
+            <span x-show="a.investigation" class="font-mono text-ink-muted" x-text="'[' + a.investigation + ']'"></span>
+            <span class="ml-auto" x-text="a.created_at"></span>
+          </div>
+        </div>
+        <button x-show="!a.acknowledged" @click="ack(a)"
+                class="text-xs px-2 py-1 text-ink-muted hover:text-ink border border-bg-border rounded">
+          Ack
+        </button>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script>
+function alertsView() {
+  return {
+    alerts: [], includeAck: false,
+    async load() {
+      const d = await fetch('/api/alerts?include_ack=' + this.includeAck).then(r => r.json());
+      this.alerts = d.alerts || [];
+    },
+    async ack(a) {
+      await fetch('/api/alerts/' + a.id + '/ack', { method: 'POST' });
+      location.reload();  // refresh the nav bell count too
+    },
+    async ackAll() {
+      await fetch('/api/alerts/ack-all', { method: 'POST' });
+      location.reload();
+    },
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,30 @@
+# kipi-investigations — direct dependencies (issue oss-install-story).
+# Every third-party module the serve + ingest + agent paths import, pinned to
+# tested major ranges. test_oss_install.py enforces import coverage.
+
+# Web app (graph UI, API, uploads)
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+jinja2>=3.1,<4
+python-multipart>=0.0.9,<1
+starlette>=0.40,<2          # fastapi dep; imported directly by the test client
+
+# Agent + tool belt
+mcp>=1.10,<2
+claude-agent-sdk>=0.2,<1
+
+# Ingest (PDF / images / spreadsheets — OCR runs the `tesseract` binary via
+# subprocess, NOT pytesseract; see docs/16-adaptive-pipeline.md §3.7).
+# pypdfium2 (BSD) replaced the former AGPL pdf engine 2026-06-10 (license decision).
+pypdfium2>=5,<6
+pdfplumber>=0.11,<1
+pillow>=10,<13
+openpyxl>=3.1,<4
+
+# Enrichment + graph analytics
+dnspython>=2.6,<3
+networkx>=3.4,<4
+python-louvain==0.16
+
+# Test suite
+pytest>=8,<10

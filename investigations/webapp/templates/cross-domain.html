@@ -1,0 +1,58 @@
+{% extends "_layout.html" %}
+{% block title %}Cross-domain · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto" x-data="{ busy: false, msg: '' }">
+
+  <div class="flex items-start justify-between gap-3 mb-4">
+    <div class="min-w-0">
+      <h1 class="font-display text-xl font-semibold text-ink">Cross-domain links</h1>
+      <p class="text-sm text-ink-muted mt-0.5">
+        Entities tied together because they share a fingerprint: a tracking tag, WalletConnect id, service-account id, or nameserver. The strongest "same operator" signal in web/ad/affiliate fraud.
+      </p>
+    </div>
+    <button :disabled="busy"
+            @click="busy = true; msg = 'Extracting + correlating…';
+                    fetch('/api/find-links', { method: 'POST' }).then(r => r.json()).then(d => {
+                      if (d.error) { msg = d.error; busy = false; return; } location.reload();
+                    }).catch(() => { msg = 'Failed — try again'; busy = false; })"
+            class="shrink-0 text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+      <span x-show="!busy">Find links</span>
+      <span x-show="busy" x-cloak x-text="msg"></span>
+    </button>
+  </div>
+
+  {% if not hubs %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-6 text-sm text-ink-muted">
+    {% if fp_count == 0 %}
+    No fingerprints extracted in scope yet. Click <strong>Find links</strong> to re-scan the reports for tracking tags, WalletConnect ids, service-account ids, and nameservers, then correlate what's shared.
+    {% else %}
+    Found <span class="font-mono text-ink">{{ fp_count }}</span> fingerprint(s), but none are shared across 2+ entities yet. That's expected when each value appears on only one site. Share grows as you ingest more reports / per-domain records carrying the same fingerprint.
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="text-xs text-ink-muted mb-3">{{ hubs|length }} shared fingerprint{{ '' if hubs|length == 1 else 's' }} linking 2+ entities.</div>
+  <div class="space-y-3">
+    {% for h in hubs %}
+    <div class="bg-bg-card border border-bg-border rounded-lg p-4 rail rail-watch">
+      <div class="flex items-center justify-between gap-3 mb-2">
+        <div class="min-w-0">
+          <span class="role-pill role-ioc">{{ h.type }}</span>
+          <span class="font-mono text-sm text-ink ml-1">{{ h.fingerprint }}</span>
+        </div>
+        <div class="shrink-0 text-right">
+          <span class="text-sm font-semibold text-ink num">{{ h.partner_count }}</span>
+          <span class="text-xs text-ink-muted"> linked</span>
+          <div class="text-[10px] text-ink-faint">{{ h.strength }} · {{ h.confidence }}</div>
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-1.5">
+        {% for p in h.partners %}
+        <a href="/entity/{{ p.id }}" class="text-xs px-2 py-0.5 bg-bg-soft border border-bg-border rounded hover:border-accent/50 hover:text-accent font-mono">{{ p.name[:48] }}</a>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,27 @@
+{# Lifecycle progress rail — the "arrows on the floor". Renders the six
+   investigation stages with done (✓) / current (●) / todo (number) state for the
+   single active case. nav.stages is computed in _lifecycle_state() and is None
+   for all-cases / multi-select, so the rail simply doesn't render there. #}
+{% if nav and nav.stages %}
+{% set rpath = request.url.path if request else '/' %}
+{% set cur = namespace(key='') %}
+{% if rpath.startswith('/reports') %}{% set cur.key = 'intake' %}
+{% elif rpath.startswith('/schema') %}{% set cur.key = 'understand' %}
+{% elif rpath.startswith('/runs') or rpath.startswith('/entities') or rpath.startswith('/entity') or rpath.startswith('/graph') or rpath.startswith('/findings') or rpath.startswith('/enrich') %}{% set cur.key = 'investigate' %}
+{% elif rpath.startswith('/synthesis') or rpath.startswith('/briefs') or rpath.startswith('/exports') or rpath == '/report' or rpath.startswith('/report/') %}{% set cur.key = 'deliver' %}
+{% elif rpath.startswith('/cross-case') or rpath.startswith('/cross-domain') or rpath.startswith('/bridges') %}{% set cur.key = 'portfolio' %}
+{% endif %}
+<div class="flex items-center gap-1 text-[11px] font-medium mb-5 overflow-x-auto pb-1">
+  {% for s in nav.stages %}
+  {% set is_cur = (s.key == cur.key) %}
+  <a href="{{ s.href }}" title="{{ s.label }} — {{ s.detail }}"
+     class="flex items-center gap-1.5 px-2.5 py-1 rounded whitespace-nowrap transition-colors
+            {% if is_cur %}bg-accent text-white{% elif s.done %}bg-conf-high/10 text-conf-high hover:bg-conf-high/15{% else %}bg-bg-soft text-ink-muted hover:text-ink{% endif %}">
+    <span class="num">{% if is_cur %}●{% elif s.done %}✓{% else %}{{ s.num }}{% endif %}</span>
+    <span>{{ s.label }}</span>
+    {% if s.count and s.count > 0 %}<span class="num {{ 'text-white/70' if is_cur else 'opacity-70' }}">{{ s.count }}</span>{% endif %}
+  </a>
+  {% if not loop.last %}<span class="text-ink-faint shrink-0">›</span>{% endif %}
+  {% endfor %}
+</div>
+{% endif %}

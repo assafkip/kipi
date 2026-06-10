@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}kipi-investigations{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+    <!-- Layout extensions (pinned; graph.html feature-checks before offering them, so a
+         failed CDN load hides the option without blanking the graph). cytoscape-dagre
+         auto-registers against the global cytoscape above. -->
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <script src="https://unpkg.com/cytoscape-expand-collapse@4.1.1/cytoscape-expand-collapse.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans:    ['Inter', 'system-ui', 'sans-serif'],
+              display: ['Space Grotesk', 'Inter', 'system-ui', 'sans-serif'],
+              mono:    ['IBM Plex Mono', 'ui-monospace', 'monospace'],
+            },
+            colors: {
+              bg:   { DEFAULT: '#FAFAF9', soft: '#F4F4F3', card: '#FFFFFF', border: '#E6E4DF', line: '#D6D3CC' },
+              ink:  { DEFAULT: '#1A1A19', muted: '#57534E', faint: '#8A847D' },
+              accent: { DEFAULT: '#0F766E', hover: '#0B5F58', ink: '#0B4F49' },
+              role: { operator: '#C2410C', channel: '#7E22CE', ioc: '#B91C1C', infra: '#15803D', source: '#475569' },
+              conf: { high: '#15803D', medium: '#B45309', low: '#57534E' },
+              sev:  { high: '#B91C1C', med: '#B45309', low: '#475569' },
+              status: { new: '#0F766E', up: '#B91C1C', down: '#15803D' },
+              seed: '#7E22CE',
+            },
+            boxShadow: {
+              card: '0 1px 2px rgba(28,25,23,0.04), 0 1px 3px rgba(28,25,23,0.06)',
+              pop:  '0 8px 24px rgba(28,25,23,0.10), 0 2px 6px rgba(28,25,23,0.06)',
+            },
+          }
+        }
+      }
+    </script>
+    <style>
+      [x-cloak] { display: none !important; }
+      body { background: #FAFAF9; color: #1A1A19; }
+      /* Rendered markdown (agent findings / dossiers / briefs) — modest spacing. */
+      .markdown p { margin: 0 0 0.5em; }
+      .markdown p:last-child { margin-bottom: 0; }
+      .markdown ul { margin: 0.25em 0; padding-left: 1.1em; list-style: disc; }
+      .markdown strong { font-weight: 600; }
+      .markdown code { font-family: ui-monospace, monospace; font-size: 0.92em; background: rgba(0,0,0,0.05); padding: 0 0.25em; border-radius: 3px; }
+      .markdown a { color: #0F766E; }
+      /* Node names in a chat reply — click to spotlight on the graph. */
+      .markdown .chat-node { cursor: pointer; }
+      .markdown .chat-node:hover { color: #0F766E; text-decoration: underline; text-underline-offset: 2px; }
+      .num { font-variant-numeric: tabular-nums; }
+      ::-webkit-scrollbar { width: 9px; height: 9px; }
+      ::-webkit-scrollbar-track { background: #F4F4F3; }
+      ::-webkit-scrollbar-thumb { background: #D6D3CC; border-radius: 5px; }
+      ::-webkit-scrollbar-thumb:hover { background: #B8B3AB; }
+      :focus-visible { outline: 2px solid rgba(15,118,110,.55); outline-offset: 2px; }
+
+      /* Signature: 3px colored left rail for priority / high-attention rows + entity hero */
+      .rail { border-left: 3px solid var(--rail, #0F766E); }
+      .rail-high  { --rail: #B91C1C; }
+      .rail-elev  { --rail: #B45309; }
+      .rail-watch { --rail: #0F766E; }
+
+      /* Role pills — -700 ink on soft tint, AA on white, label always present */
+      .role-pill { font: 600 10px/1.4 'Inter',sans-serif; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: .04em; }
+      .role-operator { background: rgba(234,88,12,.12); color: #C2410C; }
+      .role-channel  { background: rgba(147,51,234,.10); color: #7E22CE; }
+      .role-ioc      { background: rgba(220,38,38,.10);  color: #B91C1C; }
+      .role-infra    { background: rgba(22,163,74,.12);  color: #15803D; }
+      .role-source   { background: rgba(71,85,105,.10);  color: #475569; }
+      .role-         { background: #F4F4F3; color: #57534E; }
+
+      .sub-role-pill { font: 600 10px/1.4 'Inter',sans-serif; padding: 2px 7px; border-radius: 3px; text-transform: lowercase; letter-spacing: .02em; border: 1px solid currentColor; }
+      .sub-role-leadership{color:#BE123C} .sub-role-facilitator{color:#BE185D} .sub-role-recruiter{color:#A21CAF}
+      .sub-role-propagandist{color:#7E22CE} .sub-role-developer{color:#6D28D9} .sub-role-defacer{color:#C2410C}
+      .sub-role-spokesperson{color:#0E7490} .sub-role-infra_provider{color:#0F766E} .sub-role-member{color:#475569} .sub-role-unknown{color:#57534E}
+
+      .conf-high{color:#15803D} .conf-medium{color:#B45309} .conf-low{color:#57534E}
+      .cluster-chip { font: 500 10px/1.4 'Inter',sans-serif; padding: 2px 8px; border-radius: 10px; display: inline-block; white-space: nowrap; }
+
+      .kbd { font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:11px; background:#F4F4F3; color:#57534E; padding:1px 5px; border-radius:3px; border:1px solid #E6E4DF; }
+
+      /* Score meter — inline stacked composition bar */
+      .score-meter { display:inline-flex; height:6px; width:110px; border-radius:3px; overflow:hidden; background:#F4F4F3; vertical-align:middle; }
+      .score-meter > span { display:block; height:100%; }
+      .seg-role{background:#0F766E} .seg-reports{background:#5EA9A2} .seg-degree{background:#A7CFCB} .seg-seed{background:#7E22CE} .seg-prop{background:#C2410C}
+
+      /* Markdown — light */
+      .markdown h1,.markdown h2,.markdown h3 { font-family:'Space Grotesk',sans-serif; font-weight:600; margin-top:1.2em; margin-bottom:.4em; color:#1A1A19; }
+      .markdown h1 { font-size:1.5em; } .markdown h2 { font-size:1.25em; color:#0B4F49; } .markdown h3 { font-size:1.05em; }
+      .markdown ul,.markdown ol { margin-left:1.2em; list-style-position:outside; } .markdown ul { list-style:disc; } .markdown ol { list-style:decimal; }
+      .markdown li { margin:.25em 0; } .markdown p { margin:.6em 0; }
+      .markdown table { border-collapse:collapse; margin:.8em 0; width:100%; }
+      .markdown th,.markdown td { border:1px solid #E6E4DF; padding:6px 10px; text-align:left; }
+      .markdown th { background:#F4F4F3; color:#57534E; font-weight:600; }
+      .markdown code { background:#F4F4F3; color:#0B4F49; padding:1px 5px; border-radius:3px; font-family:'IBM Plex Mono',monospace; font-size:.9em; }
+      .markdown blockquote { border-left:3px solid #0F766E; padding-left:12px; color:#57534E; margin:.6em 0; }
+    </style>
+</head>
+<body class="font-sans antialiased min-h-screen">
+  {% set path = (request.url.path if request else '/') %}
+  {% set sig_count = ((nav.open_alerts or 0) + (nav.open_corrections or 0)) if nav else 0 %}
+  {% set done_keys = (nav.stages|selectattr('done')|map(attribute='key')|list) if (nav and nav.stages) else [] %}
+  {# Sidebar nav row: active = accent left-rail + tint. #}
+  {% macro sidelink(href, label, active=false, badge=0, badge_class='bg-sev-med') %}
+    <a href="{{ href }}"
+       class="flex items-center gap-2 pl-3 pr-2 py-1.5 text-sm rounded-md border-l-2 {{ 'border-accent bg-accent/10 text-accent font-medium' if active else 'border-transparent text-ink-muted hover:text-ink hover:bg-bg-soft' }}">
+      <span class="truncate">{{ label }}</span>
+      {% if badge and badge > 0 %}<span class="ml-auto text-[10px] {{ badge_class }} text-white rounded-full px-1.5 font-semibold leading-4">{{ badge }}</span>{% endif %}
+    </a>
+  {% endmacro %}
+  {% macro grouphdr(label, badge=0) %}
+    <div class="flex items-center gap-2 px-3 pt-4 pb-1">
+      <span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">{{ label }}</span>
+      {% if badge and badge > 0 %}<span class="text-[10px] bg-sev-high text-white rounded-full px-1.5 font-semibold leading-4">{{ badge }}</span>{% endif %}
+    </div>
+  {% endmacro %}
+  {# Lifecycle stage header: numbered, turns teal + ✓ once the stage is complete
+     for the active case. done_keys is empty for all-cases/multi (no ✓ then). #}
+  {% macro stagehdr(num, label, key, done_keys) %}
+    {% set is_done = key in done_keys %}
+    <div class="flex items-center gap-1.5 px-3 pt-4 pb-1">
+      <span class="text-[10px] font-semibold uppercase tracking-[0.14em] {{ 'text-accent' if is_done else 'text-ink-faint' }}">{{ num }} · {{ label }}</span>
+      {% if is_done %}<span class="text-[10px] text-conf-high leading-none">✓</span>{% endif %}
+    </div>
+  {% endmacro %}
+  <div x-data="{ searchOpen: false, searchQuery: '', searchResults: [], sidebarOpen: false }"
+       @keydown.window.cmd.k.prevent="searchOpen = true; setTimeout(() => document.getElementById('global-search').focus(), 50)"
+       @keydown.window.ctrl.k.prevent="searchOpen = true; setTimeout(() => document.getElementById('global-search').focus(), 50)"
+       @keydown.escape="searchOpen = false; sidebarOpen = false">
+
+    <!-- First-run welcome: the map for someone who has never seen a tool like this
+         (the "Maya" junior-analyst persona). Shows once (localStorage), reopenable from
+         the top strip's "How it works". Frames the 4 steps + one clear place to start,
+         so the 13-link sidebar isn't a wall on day one. -->
+    <div x-data="{ open: false }"
+         x-init="open = !localStorage.getItem('kipi_welcome_seen')"
+         @open-welcome.window="open = true">
+      <div x-show="open" x-cloak @click="open=false; localStorage.setItem('kipi_welcome_seen','1')"
+           class="fixed inset-0 z-[60] bg-ink/40 flex items-center justify-center p-4">
+        <div @click.stop class="max-w-lg w-full bg-bg-card border border-bg-border rounded-xl shadow-card p-6">
+          <h2 class="text-lg font-semibold text-ink">New here? Here's how it works.</h2>
+          <p class="text-sm text-ink-muted mt-1.5 leading-relaxed">
+            An investigation runs in 4 steps. You don't need every button in the sidebar —
+            just follow the highlighted <span class="text-accent font-medium">Next step</span> and it walks you through.
+          </p>
+          <ol class="mt-4 space-y-2 text-sm">
+            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">1</span><span><span class="font-medium text-ink">Intake</span> <span class="text-ink-muted">— drop your evidence: PDFs, screenshots, a scrape, or paste notes.</span></span></li>
+            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">2</span><span><span class="font-medium text-ink">Investigate</span> <span class="text-ink-muted">— the agent digs the open web and builds the graph (it models the case for you — nothing to set up).</span></span></li>
+            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">3</span><span><span class="font-medium text-ink">Deliver</span> <span class="text-ink-muted">— get the written brief.</span></span></li>
+            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">4</span><span><span class="font-medium text-ink">Portfolio</span> <span class="text-ink-muted">— see how this case links to your others.</span></span></li>
+          </ol>
+          <div class="mt-5 flex flex-wrap items-center gap-2">
+            <a href="/simple" @click="localStorage.setItem('kipi_welcome_seen','1')"
+               class="text-sm px-4 py-2 bg-accent text-white rounded-lg hover:bg-accent-hover">⚡ Try Quick look — one name, watch it build</a>
+            <a href="/cases" @click="localStorage.setItem('kipi_welcome_seen','1')"
+               class="text-sm px-3 py-2 border border-bg-border rounded-lg hover:bg-bg-soft">Start with a case →</a>
+            <button @click="open=false; localStorage.setItem('kipi_welcome_seen','1')"
+                    class="text-sm px-3 py-2 text-ink-muted hover:text-ink ml-auto">Got it</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex min-h-screen">
+      <!-- Mobile backdrop -->
+      <div x-show="sidebarOpen" x-cloak @click="sidebarOpen = false" x-transition.opacity
+           class="fixed inset-0 bg-ink/30 z-40 md:hidden"></div>
+
+      <!-- Sidebar -->
+      <aside class="fixed md:sticky inset-y-0 left-0 top-0 z-40 w-56 h-screen shrink-0 bg-bg-card border-r border-bg-border flex flex-col transition-transform md:translate-x-0"
+             :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'">
+        <a href="/" class="flex items-center gap-2 px-4 h-12 border-b border-bg-border shrink-0">
+          <span class="text-xs px-1.5 py-0.5 bg-accent text-white rounded tracking-wide font-display font-semibold">kipi</span>
+          <span class="text-sm font-display font-semibold text-ink">investigations</span>
+        </a>
+        <nav class="flex-1 overflow-y-auto px-2 pb-6" @click="sidebarOpen = false">
+          {# Sidebar follows the investigation lifecycle, in order: where to look
+             first (Focus), then Intake → Investigate → Findings →
+             Deliver → Portfolio. Stage headers light up ✓ as each completes. #}
+          {{ grouphdr('Triage') }}
+          {{ sidelink('/', 'Focus', active=(path in ['/', '/focus'])) }}
+
+          {{ stagehdr(1, 'Intake', 'intake', done_keys) }}
+          {{ sidelink('/reports', 'Reports', active=path.startswith('/reports')) }}
+          {{ sidelink('/sources', 'Sources', active=path.startswith('/sources')) }}
+
+          {# Schema/Understand stage removed: the tool auto-models the case schema
+             during Process — no analyst step, not shown. /schema stays URL-only. #}
+          {{ stagehdr(2, 'Investigate', 'investigate', done_keys) }}
+          {# Collapsed by default to ONE item so the sidebar isn't a wall of 13. The
+             four sub-tabs (Graph / Runs / Enrich / Chat / Entities) reveal, indented,
+             only when you're actually in the Investigate section. #}
+          {% set in_investigate = path.startswith('/entities') or path.startswith('/entity')
+             or path.startswith('/graph') or path.startswith('/runs') or path.startswith('/findings')
+             or path.startswith('/enrich') %}
+          {{ sidelink('/runs', 'Investigate', active=in_investigate) }}
+          {% if in_investigate %}
+          <div class="ml-3 pl-2 border-l border-bg-border">
+            {{ sidelink('/graph', 'Graph', active=path.startswith('/graph')) }}
+            {{ sidelink('/runs', 'Runs & findings', active=(path.startswith('/runs') or path.startswith('/findings'))) }}
+            {{ sidelink('/enrich', 'Enrich', active=path.startswith('/enrich')) }}
+            {# Chat moved to the always-on bubble (bottom-right, every page) — no side link. #}
+            {{ sidelink('/entities', 'Entities', active=(path.startswith('/entities') or path.startswith('/entity'))) }}
+          </div>
+          {% endif %}
+
+          {{ grouphdr('Signals', badge=sig_count) }}
+          {{ sidelink('/alerts', 'Inbox', active=(path.startswith('/alerts') or path.startswith('/corrections') or path.startswith('/activity')), badge=sig_count, badge_class='bg-sev-high') }}
+
+          {{ stagehdr(3, 'Deliver', 'deliver', done_keys) }}
+          {{ sidelink('/synthesis', 'Deliverables', active=(path.startswith('/synthesis') or path.startswith('/briefs') or path.startswith('/exports') or path == '/report' or path.startswith('/report/'))) }}
+
+          {{ stagehdr(4, 'Portfolio', 'portfolio', done_keys) }}
+          {{ sidelink('/cross-case', 'Cross-case', active=(path.startswith('/cross-case') or path.startswith('/bridges'))) }}
+          {{ sidelink('/cross-domain', 'Cross-domain', active=path.startswith('/cross-domain')) }}
+        </nav>
+      </aside>
+
+      <!-- Content column -->
+      <div class="flex-1 min-w-0 flex flex-col">
+        <!-- Top strip: global controls -->
+        <div class="sticky top-0 z-30 bg-bg/85 backdrop-blur border-b border-bg-border">
+          <div class="px-4 h-12 flex items-center gap-3">
+            <button @click="sidebarOpen = !sidebarOpen" class="md:hidden p-1.5 -ml-1 rounded hover:bg-bg-soft text-ink-muted" title="Menu">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+            </button>
+            <div class="flex-1"></div>
+            <button @click="$dispatch('open-welcome')"
+                    class="text-xs px-2 py-1 rounded text-ink-muted hover:text-accent hover:bg-bg-soft"
+                    title="How this works">? How it works</button>
+            {% if nav %}
+            <!-- Case switcher: multi-select. Check one or more cases; every view
+                 then represents the chosen set. -->
+            <div class="relative"
+                 x-data="caseSwitcher()"
+                 @click.outside="open = false">
+              <button @click="open = !open"
+                      class="flex items-center gap-2 text-sm bg-bg-soft border border-bg-border px-3 py-1.5 rounded hover:bg-bg-border/40">
+                <span class="text-[11px] text-ink-faint uppercase tracking-wider">Cases</span>
+                <span class="font-mono text-xs {% if nav.active_cases %}text-accent{% else %}text-ink{% endif %}">
+                  {% if not nav.active_cases %}All cases{% elif nav.active_cases|length == 1 %}{{ nav.active_cases[0] }}{% else %}{{ nav.active_cases|length }} cases{% endif %}
+                </span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-ink-faint"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+              <div x-show="open" x-cloak x-transition.opacity
+                   class="absolute right-0 mt-1 w-72 bg-bg-card border border-bg-border rounded-lg shadow-pop z-50 overflow-hidden">
+                <label class="flex items-center gap-2 px-4 py-2 text-sm hover:bg-bg-soft cursor-pointer">
+                  <input type="radio" :checked="picked.length === 0" @change="picked = []" class="accent-accent">
+                  <span :class="picked.length === 0 ? 'text-accent font-medium' : ''">All cases</span>
+                </label>
+                <div class="border-t border-bg-border"></div>
+                <div class="max-h-64 overflow-y-auto">
+                  {% for c in nav.cases %}
+                  <label class="flex items-center justify-between gap-2 px-4 py-2 text-sm hover:bg-bg-soft cursor-pointer">
+                    <span class="flex items-center gap-2 min-w-0">
+                      <input type="checkbox" :checked="picked.includes('{{ c.slug }}')" @change="toggle('{{ c.slug }}')" class="accent-accent shrink-0">
+                      <span class="font-mono text-xs truncate" :class="picked.includes('{{ c.slug }}') ? 'text-accent' : ''">{{ c.case_name or c.slug }}</span>
+                    </span>
+                    <span class="text-xs text-ink-faint num shrink-0">{{ c.report_count }}</span>
+                  </label>
+                  {% endfor %}
+                </div>
+                <div class="border-t border-bg-border"></div>
+                <div class="flex items-center justify-between px-4 py-2">
+                  <a href="/cases" class="text-xs text-ink-muted hover:text-accent">Manage →</a>
+                  <button @click="apply()" class="text-xs px-3 py-1 bg-accent text-white rounded hover:bg-accent-hover">Apply</button>
+                </div>
+              </div>
+            </div>
+            <button onclick="window.__setAnalyst()" title="Set your analyst name (for attribution)"
+                    class="flex items-center gap-1.5 text-sm bg-bg-soft border border-bg-border px-3 py-1.5 rounded hover:bg-bg-border/40">
+              <span class="text-[11px] text-ink-faint">You</span>
+              <span class="font-mono text-xs {% if nav.analyst and nav.analyst != 'anonymous' %}text-accent{% else %}text-ink-muted{% endif %}">{{ nav.analyst }}</span>
+            </button>
+            {% endif %}
+            <button @click="searchOpen = true; setTimeout(() => document.getElementById('global-search').focus(), 50)"
+                    class="flex items-center gap-2 text-sm text-ink-muted hover:text-ink bg-bg-soft border border-bg-border px-3 py-1.5 rounded">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <span class="hidden lg:inline">Search</span>
+              <span class="kbd">⌘K</span>
+            </button>
+          </div>
+        </div>
+
+        <main class="px-4 py-5 w-full max-w-[1400px] mx-auto">
+          {# Lifecycle progress rail — shows only for a single active case. #}
+          <div class="max-w-5xl mx-auto">{% include "_lifecycle_rail.html" %}</div>
+          {% include "_next_step.html" %}
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+
+    <!-- Search modal -->
+    <div x-show="searchOpen" x-cloak @click.self="searchOpen = false"
+         class="fixed inset-0 bg-ink/40 z-50 flex items-start justify-center pt-24" x-transition.opacity>
+      <div class="bg-bg-card border border-bg-border rounded-lg shadow-pop w-full max-w-2xl mx-4">
+        <input id="global-search" type="text" x-model="searchQuery"
+               placeholder="Search by name, handle, IP, channel, alias…"
+               class="w-full bg-transparent px-5 py-4 outline-none text-lg border-b border-bg-border text-ink placeholder:text-ink-faint"
+               @input.debounce.200ms="
+                 if (searchQuery.length < 2) { searchResults = []; return; }
+                 fetch('/api/search?q=' + encodeURIComponent(searchQuery))
+                   .then(r => r.json()).then(d => searchResults = d.results)">
+        <div class="max-h-96 overflow-y-auto">
+          <template x-for="r in searchResults" :key="r.id">
+            <a :href="'/entity/' + r.id" class="flex items-center gap-3 px-5 py-3 hover:bg-bg-soft border-b border-bg-border">
+              <span class="role-pill" :class="'role-' + (r.role || '')" x-text="r.role || r.entity_type"></span>
+              <span class="font-mono text-sm text-ink" x-text="r.canonical_name"></span>
+              <span class="ml-auto text-xs text-ink-faint num" x-text="r.threat_score ? 'score ' + Math.round(r.threat_score) : ''"></span>
+            </a>
+          </template>
+          <div x-show="searchQuery.length >= 2 && searchResults.length === 0" class="px-5 py-4 text-ink-muted text-sm">No matches.</div>
+          <div x-show="searchQuery.length < 2" class="px-5 py-4 text-ink-muted text-sm">Start typing. <span class="kbd">esc</span> to close.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Deterministic cluster color (LIGHT): same id -> same hue, AA-legible.
+    window.clusterColor = function(id) {
+      if (id === undefined || id === null) return { fg: '#475569', bg: 'rgba(71,85,105,0.10)', border: '#D6D3CC' };
+      const h = (Number(id) * 137.5) % 360;
+      return { fg: `hsl(${h} 70% 32%)`, bg: `hsl(${h} 60% 94%)`, border: `hsl(${h} 45% 78%)` };
+    };
+    window.clusterChipStyle = function(id) {
+      const c = window.clusterColor(id);
+      return `color: ${c.fg}; background: ${c.bg}; border: 1px solid ${c.border};`;
+    };
+    // Initial selection injected here (tojson is only safe inside <script>, not
+    // in a double-quoted x-data attribute where its quotes break the attribute).
+    window.__activeCases = {{ (nav.active_cases if nav else [])|tojson }};
+    // Multi-select case switcher state (named factory so x-data stays a simple
+    // expression — inline method shorthand breaks Alpine's evaluator).
+    window.caseSwitcher = function() {
+      return {
+        open: false,
+        picked: Array.isArray(window.__activeCases) ? window.__activeCases.slice() : [],
+        toggle(s) {
+          this.picked = this.picked.includes(s)
+            ? this.picked.filter(x => x !== s) : [...this.picked, s];
+        },
+        apply() {
+          window.location = '/select-case/' + (this.picked.length ? this.picked.join(',') : '__all__');
+        },
+      };
+    };
+    window.__setAnalyst = function() {
+      const name = prompt('Your analyst name (used to attribute notes + activity):');
+      if (name && name.trim()) window.location.href = '/set-analyst/' + encodeURIComponent(name.trim());
+    };
+
+    // PRD-11: shared "data changed → refresh" subscriber. Any view registers a callback
+    // via window.kipiOnCaseChange(fn); it fires when the active case's server-side
+    // version moves (an agent run promoted nodes, Process retyped, a reject dropped an
+    // edge, a brief regen). One mechanism so every view stays live — replacing the
+    // per-page visibilitychange/watchRun reload hacks. Per-case only (one case selected).
+    window.__kipiChangeSubs = [];
+    window.kipiOnCaseChange = function(fn) {
+      if (typeof fn === 'function') window.__kipiChangeSubs.push(fn);
+    };
+    (function () {
+      const cases = Array.isArray(window.__activeCases) ? window.__activeCases : [];
+      if (cases.length !== 1) return;            // signal is per-case; off for all/multi
+      const theCase = cases[0];
+      let since = null;                          // null = baseline not yet established
+      async function poll() {
+        try {
+          const q = '/api/changed?case=' + encodeURIComponent(theCase) +
+                    (since == null ? '' : '&since=' + since);
+          const d = await fetch(q).then(r => r.json());
+          if (since == null) {                   // first poll: set baseline, don't fire
+            since = d.version;
+          } else if (d.changed) {
+            since = d.version;
+            window.__kipiChangeSubs.forEach(fn => { try { fn(theCase); } catch (e) {} });
+          }
+        } catch (e) { /* transient; next tick retries */ }
+      }
+      setInterval(poll, 3000);
+      poll();
+    })();
+  </script>
+
+  <!-- THE chat — one box, every capability, every page. Grounded Q&A + investigator +
+       graph control + case creation, all through /api/chat. Pages that DOCK the chat
+       inline (graph split-view) override block chat to empty so the corner bubble is
+       suppressed there — one chat per page, never two. -->
+  {% block chat %}{% include "_chat.html" %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,34 @@
+{# Persistent "Next step" strip — the one primary next move for the active case,
+   reachable from every room (ui-ux-pro-max `primary-action`). nav.next_action is
+   the single source of truth (first lifecycle stage not done). Hidden on the page
+   that already owns that action (so we never show two competing primary CTAs) and
+   for all/multi-case views (no next_action). #}
+{# Also suppressed on /reports when the next move is the investigator: the Process
+   panel there surfaces "Run investigator" right next to the Process button, so a
+   second copy up top would just compete with it. #}
+{% if nav and nav.next_action
+      and not (request and request.url.path.startswith(nav.next_action.href.split('?')[0]))
+      and not (request and request.url.path.startswith('/reports') and nav.next_action.key == 'investigate') %}
+<div class="max-w-5xl mx-auto mb-5">
+  <div class="flex flex-wrap items-center gap-3 bg-bg-card border border-bg-border rounded-lg px-4 py-3">
+    <div class="min-w-0 flex-1">
+      <div class="text-[11px] uppercase tracking-wide text-ink-faint font-medium">Next step</div>
+      <div class="text-sm text-ink-muted">{{ nav.next_action.hint }}</div>
+    </div>
+    {% if nav.next_action.ready %}
+    <div class="flex items-center gap-3 text-xs">
+      {% for r in nav.next_action.ready %}
+      <a href="{{ r.href }}"
+         class="text-ink-muted hover:text-accent underline-offset-2 hover:underline whitespace-nowrap">
+        {{ r.label }}{% if r.count %} ({{ r.count }}){% endif %} ready ›
+      </a>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <a href="{{ nav.next_action.href }}"
+       class="shrink-0 text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover">
+      {{ nav.next_action.label }}
+    </a>
+  </div>
+</div>
+{% endif %}

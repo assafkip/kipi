@@ -1,0 +1,15 @@
+#!/bin/bash
+# Wrapper for invctl that uses the project venv.
+# Usage: ./invctl ingest --inbox
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "venv not found at $VENV_PYTHON" >&2
+    echo "Run: python3 -m venv .venv && .venv/bin/pip install pytesseract pillow pdfplumber" >&2
+    exit 1
+fi
+
+cd "$SCRIPT_DIR"
+exec "$VENV_PYTHON" -m investigations.cli.invctl "$@"

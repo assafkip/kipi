@@ -1,0 +1,61 @@
+{% extends "_layout.html" %}
+{% block title %}Cross-case · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-6xl mx-auto">
+  {% include "_entity_views.html" %}
+  <div class="mb-4">
+    <h1 class="text-xl font-display font-semibold tracking-tight">Cross-case actors &amp; indicators</h1>
+    <p class="text-sm text-ink-muted mt-1">
+      Entities that appear in 2+ cases — the pivot intel.
+      {% if nav and nav.active_case %}Scoped to overlaps touching <span class="font-mono text-accent">{{ nav.active_case }}</span>.{% else %}Across all cases.{% endif %}
+      Generic infrastructure (bare platform domains) is filtered out.
+    </p>
+  </div>
+
+  {% if not entities %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-8 text-center text-ink-muted">
+    No actor or indicator appears in more than one case yet.
+    As you add reports across cases, shared entities surface here automatically.
+  </div>
+  {% else %}
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-4 py-2">Actor / Indicator</th>
+          <th class="text-left px-4 py-2">Role</th>
+          <th class="text-center px-4 py-2">Cases</th>
+          <th class="text-left px-4 py-2">Appears in</th>
+          <th class="text-right px-4 py-2">Score</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        {% for e in entities %}
+        <tr class="hover:bg-bg-soft">
+          <td class="px-4 py-2.5 font-mono">
+            <a href="/entity/{{ e.id }}" class="hover:text-accent">{{ e.canonical_name }}</a>
+            <span class="text-xs text-ink-faint ml-1">{{ e.entity_type }}</span>
+          </td>
+          <td class="px-4 py-2.5">
+            <span class="role-pill role-{{ e.role or '' }}">{{ e.role or e.entity_type }}</span>
+            {% if e.sub_role %}<span class="sub-role-pill sub-role-{{ e.sub_role }}">{{ e.sub_role }}</span>{% endif %}
+          </td>
+          <td class="px-4 py-2.5 text-center">
+            <span class="font-mono px-2 py-0.5 bg-amber-500/15 text-sev-med border border-amber-500/40 rounded">{{ e.case_count }}</span>
+          </td>
+          <td class="px-4 py-2.5">
+            <div class="flex flex-wrap gap-1">
+              {% for c in e.case_list %}
+              <a href="/select-case/{{ c }}" class="text-xs font-mono px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded hover:border-accent">{{ c }}</a>
+              {% endfor %}
+            </div>
+          </td>
+          <td class="px-4 py-2.5 text-right font-mono text-ink-muted">{{ '%d'|format(e.threat_score) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

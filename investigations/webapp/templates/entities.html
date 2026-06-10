@@ -1,0 +1,119 @@
+{% extends "_layout.html" %}
+{% block title %}Entities · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="entitiesView()"
+     x-init="load(); if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => load())"
+     class="max-w-7xl mx-auto">
+  {% include "_entity_views.html" %}
+  <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+    <div>
+      <h1 class="text-xl font-display font-semibold tracking-tight">Entities</h1>
+      <p class="text-sm text-ink-muted mt-0.5">Every person, account, handle, domain, wallet, and piece of infrastructure found across this case.</p>
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <select x-model="role" @change="load()" class="bg-bg-card border border-bg-border rounded px-3 py-1.5 text-sm">
+        <option value="">all roles</option>
+        <option value="operator">operator</option>
+        <option value="channel">channel</option>
+        <option value="ioc">ioc</option>
+        <option value="infra">infra</option>
+      </select>
+      <select x-model="subRole" @change="load()" class="bg-bg-card border border-bg-border rounded px-3 py-1.5 text-sm">
+        <option value="">all functions</option>
+        <template x-for="sr in subRoles" :key="sr.sub_role">
+          <option :value="sr.sub_role" x-text="sr.sub_role + ' (' + sr.n + ')'"></option>
+        </template>
+      </select>
+      <input type="range" min="0" max="100" step="5" x-model.number="minScore" @input.debounce.300ms="load()" class="accent-accent w-32">
+      <span class="text-xs text-ink-muted font-mono">score ≥ <span x-text="minScore"></span></span>
+      <input type="text" x-model="filterText" placeholder="filter name…"
+             class="bg-bg-card border border-bg-border rounded px-3 py-1.5 text-sm w-48">
+    </div>
+  </div>
+
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-4 py-2 cursor-pointer hover:text-ink" @click="sortBy('canonical_name')">Name</th>
+          <th class="text-left px-4 py-2">Role</th>
+          <th class="text-left px-4 py-2">Function</th>
+          <th class="text-left px-4 py-2">Type</th>
+          <th class="text-right px-4 py-2 cursor-pointer hover:text-ink" @click="sortBy('threat_score')">Score</th>
+          <th class="text-right px-4 py-2 cursor-pointer hover:text-ink" @click="sortBy('degree')">Degree</th>
+          <th class="text-right px-4 py-2 cursor-pointer hover:text-ink" @click="sortBy('report_count')">Reports</th>
+          <th class="text-left px-4 py-2">Clusters</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        <template x-for="e in filtered()" :key="e.id">
+          <tr class="hover:bg-bg-soft">
+            <td class="px-4 py-2 font-mono">
+              <template x-if="!e.lead">
+                <a :href="'/entity/' + e.id" class="hover:text-accent" x-text="e.canonical_name"></a>
+              </template>
+              <template x-if="e.lead">
+                <span>
+                  <span class="text-ink-muted" x-text="e.canonical_name"></span>
+                  <span class="ml-1 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-border text-ink-faint"
+                        :title="'unconfirmed — gated lead (' + (e.confidence||'') + '); promote in /enrich to confirm'">lead</span>
+                </span>
+              </template>
+            </td>
+            <td class="px-4 py-2"><span class="role-pill" :class="'role-' + (e.role || '')" x-text="e.role || ''"></span></td>
+            <td class="px-4 py-2">
+              <template x-if="e.sub_role">
+                <span class="sub-role-pill" :class="'sub-role-' + e.sub_role" :title="e.sub_role_reason || ''" x-text="e.sub_role"></span>
+              </template>
+              <template x-if="!e.sub_role"><span class="text-ink-faint">—</span></template>
+            </td>
+            <td class="px-4 py-2 text-ink-muted text-xs" x-text="e.entity_type"></td>
+            <td class="px-4 py-2 text-right font-mono" x-text="e.lead ? '—' : Math.round(e.threat_score || 0)"></td>
+            <td class="px-4 py-2 text-right font-mono text-ink-muted" x-text="e.degree || 0"></td>
+            <td class="px-4 py-2 text-right font-mono text-ink-muted" x-text="e.report_count || 0"></td>
+            <td class="px-4 py-2 text-xs text-ink-muted truncate max-w-xs" x-text="e.clusters || ''"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+  <div class="text-xs text-ink-muted mt-2"><span x-text="filtered().length"></span> shown</div>
+</div>
+
+<script>
+function entitiesView() {
+  return {
+    entities: [], subRoles: [], role: '', subRole: '', minScore: 30, filterText: '',
+    sortField: 'threat_score', sortDir: -1,
+    async load() {
+      const params = new URLSearchParams({ min_score: this.minScore, limit: 400 });
+      if (this.role) params.set('role', this.role);
+      if (this.subRole) params.set('sub_role', this.subRole);
+      const d = await fetch('/api/entities?' + params).then(r => r.json());
+      this.entities = d.entities;
+      if (this.subRoles.length === 0) {
+        const f = await fetch('/api/sub-roles').then(r => r.json());
+        this.subRoles = f.sub_roles || [];
+      }
+    },
+    sortBy(field) {
+      if (this.sortField === field) this.sortDir *= -1;
+      else { this.sortField = field; this.sortDir = -1; }
+    },
+    filtered() {
+      let arr = this.entities;
+      if (this.filterText) {
+        const q = this.filterText.toLowerCase();
+        arr = arr.filter(e => (e.canonical_name || '').toLowerCase().includes(q));
+      }
+      const f = this.sortField; const d = this.sortDir;
+      return [...arr].sort((a, b) => {
+        const av = a[f] || 0; const bv = b[f] || 0;
+        if (typeof av === 'string') return av.localeCompare(bv) * d;
+        return (av - bv) * d;
+      });
+    }
+  }
+}
+</script>
+{% endblock %}

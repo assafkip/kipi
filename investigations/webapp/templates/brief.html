@@ -1,0 +1,49 @@
+{% extends "_layout.html" %}
+{% block title %}{{ name }} · brief · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto">
+  <div class="mb-4">
+    <a href="/briefs" class="text-xs text-ink-muted hover:text-accent">← all briefs</a>
+  </div>
+  <div id="brief-target" class="markdown bg-bg-card border border-bg-border rounded-lg p-6"></div>
+  <script id="brief-md" type="text/plain">{{ content }}</script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const md = document.getElementById('brief-md').textContent;
+      const target = document.getElementById('brief-target');
+      target.innerHTML = renderMd(md);
+    });
+
+    // Minimal markdown renderer (matches the one used on entity.html for dossiers)
+    function renderMd(md) {
+      if (!md) return '';
+      let html = md;
+      html = html.replace(/```([\s\S]*?)```/g, (m, c) => `<pre class="bg-bg-soft p-3 rounded my-2 overflow-x-auto"><code>${escapeHtml(c)}</code></pre>`);
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+      html = html.replace(/^(?:- (.+)(?:\n|$))+/gm, (block) => {
+        const items = block.trim().split('\n').map(l => l.replace(/^- /, ''));
+        return '<ul>' + items.map(i => `<li>${inlineMd(i)}</li>`).join('') + '</ul>\n';
+      });
+      html = html.split('\n\n').map(p => {
+        if (/^<(h\d|ul|ol|blockquote|pre|table)/.test(p.trim())) return p;
+        if (!p.trim()) return '';
+        return `<p>${inlineMd(p)}</p>`;
+      }).join('\n');
+      return html;
+    }
+    function inlineMd(s) {
+      s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      s = s.replace(/`([^`]+?)`/g, '<code>$1</code>');
+      s = s.replace(/\[([^\]]+?)\]\(([^)]+?)\)/g, '<a href="$2" class="text-accent hover:underline">$1</a>');
+      return s;
+    }
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+  </script>
+</div>
+{% endblock %}

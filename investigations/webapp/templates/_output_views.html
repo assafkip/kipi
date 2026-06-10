@@ -1,0 +1,16 @@
+{# Output deliverables tab switcher. Synthesis / Briefs / Exports / Client report
+   were four separate sidebar links; now one tabbed Output surface, modeled on
+   _signals_views.html / _entity_views.html. #}
+{% set p = request.url.path if request else '/synthesis' %}
+<div class="flex items-center gap-1 mb-4 border-b border-bg-border">
+  {% set tabs = [
+    ('/synthesis', 'Synthesis', p.startswith('/synthesis')),
+    ('/briefs', 'Briefs', p.startswith('/briefs')),
+    ('/exports', 'Exports', p.startswith('/exports')),
+    ('/report', 'Client report', (p == '/report' or p.startswith('/report/')))
+  ] %}
+  {% for href, label, active in tabs %}
+  <a href="{{ href }}"
+     class="px-3 py-2 text-sm border-b-2 -mb-px {{ 'border-accent text-accent font-medium' if active else 'border-transparent text-ink-muted hover:text-ink' }}">{{ label }}</a>
+  {% endfor %}
+</div>

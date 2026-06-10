@@ -1,0 +1,10 @@
+{# Entity-centric view switcher. Bridges + Cross-case were demoted from the
+   primary sidebar nav into tabs here, since both are lenses on entities. #}
+{% set p = request.url.path if request else '/entities' %}
+<div class="flex items-center gap-1 mb-4 border-b border-bg-border">
+  {% for href, label in [('/entities', 'All entities'), ('/bridges', 'Bridges'), ('/cross-case', 'Cross-case')] %}
+  {% set active = (p == href) or (href == '/entities' and (p == '/entities' or p.startswith('/entity/'))) %}
+  <a href="{{ href }}"
+     class="px-3 py-2 text-sm border-b-2 -mb-px {{ 'border-accent text-accent font-medium' if active else 'border-transparent text-ink-muted hover:text-ink' }}">{{ label }}</a>
+  {% endfor %}
+</div>

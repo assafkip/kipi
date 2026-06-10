@@ -1,0 +1,184 @@
+{% extends "_layout.html" %}
+{% block title %}Reports · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-7xl mx-auto">
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-semibold">Reports ({{ reports|length }})</h1>
+      <p class="text-sm text-ink-muted mt-0.5">Your evidence — what the investigation reads. Drop documents, screenshots, or a scrape, or paste notes. Raw is fine; it doesn't need to be a polished report.</p>
+    </div>
+    {% if nav and nav.active_case %}
+    <a href="/links" class="text-xs px-3 py-1.5 border border-bg-border rounded text-ink-muted hover:bg-bg-soft">
+      Image links →
+    </a>
+    {% endif %}
+  </div>
+
+  <!-- Web upload: drop evidence, OCR + entity-extract into the case. -->
+  <div x-data="uploadView()" class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm uppercase tracking-wider text-ink-muted">Add evidence</h2>
+      <div class="flex gap-1 text-xs">
+        <button @click="mode='files'" :class="mode==='files' ? 'bg-accent text-white' : 'text-ink-muted hover:bg-bg-soft'"
+                class="px-2.5 py-1 rounded">Files</button>
+        <button @click="mode='paste'" :class="mode==='paste' ? 'bg-accent text-white' : 'text-ink-muted hover:bg-bg-soft'"
+                class="px-2.5 py-1 rounded">Paste notes</button>
+      </div>
+    </div>
+    {% if nav and nav.active_case %}
+    <p class="text-xs text-ink-muted mb-3">OCR'd + entity-extracted into <span class="font-mono text-accent">{{ nav.active_case }}</span>.</p>
+    {% else %}
+    <label class="block text-xs font-medium text-ink mb-1">Name a case to file these under <span class="text-sev-high">*</span> <span class="text-ink-faint font-normal">(creates it if new)</span></label>
+    <input x-model="caseName" placeholder="e.g. acme-breach" @keydown.enter.prevent="upload()"
+           :class="caseName.trim() ? 'border-bg-border' : 'border-accent/60'"
+           class="w-full bg-bg-soft border rounded px-3 py-2 text-sm mb-3">
+    {% endif %}
+    <!-- Objective: the scope anchor. Shapes the schema, steers the investigator,
+         frames the brief. Optional but case-level — typing it points the whole run. -->
+    <label class="block text-xs font-medium text-ink mb-1">Objective <span class="text-ink-faint font-normal">(optional — what is this investigation trying to establish? It scopes the schema, the agent, and the brief.)</span></label>
+    <input x-model="objective" placeholder="e.g. confirm whether wallet 0xabc… drained victims and who controls it"
+           class="w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm mb-3">
+    {% if objective %}<p class="text-xs text-ink-faint -mt-2 mb-3">Current case objective: <span class="text-ink-muted">{{ objective }}</span></p>{% endif %}
+    <!-- Files mode -->
+    <div x-show="mode==='files'">
+      <div @dragover.prevent="hover=true" @dragleave.prevent="hover=false"
+           @drop.prevent="hover=false; addFiles($event.dataTransfer.files)"
+           @click="$refs.fi.click()"
+           :class="hover ? 'border-accent bg-accent/5' : 'border-bg-border'"
+           class="border-2 border-dashed rounded-lg p-6 text-center cursor-pointer hover:border-accent/50">
+        <input type="file" multiple x-ref="fi" class="hidden"
+               @change="addFiles($event.target.files)">
+        <div x-show="!files.length" class="text-sm text-ink-muted">Drop any file here, or click to choose. PDF / Word / images / CSV / XLSX get parsed; anything else is read as text.</div>
+        <div x-show="files.length" x-cloak class="text-sm text-ink space-y-0.5">
+          <template x-for="f in files" :key="f.name">
+            <div class="font-mono text-xs flex items-center justify-center gap-2">
+              <span x-text="f.name"></span>
+              <button @click.stop="files = files.filter(x => x !== f)" class="text-ink-faint hover:text-sev-high">✕</button>
+            </div>
+          </template>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3">
+        <button @click="upload()" :disabled="busy || !files.length || (!hasCase && !caseName.trim())"
+                class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed">
+          <span x-show="!busy" x-text="'Upload ' + files.length + ' file' + (files.length === 1 ? '' : 's')"></span>
+          <span x-show="busy" x-cloak>Processing… OCR + extraction can take a bit</span>
+        </button>
+        <span x-show="!hasCase && !caseName.trim() && files.length" x-cloak class="text-xs text-ink-faint">Name a case above to enable upload.</span>
+        <span x-show="error" x-cloak x-text="error" class="text-xs text-sev-high"></span>
+        <span x-show="done" x-cloak x-text="done" class="text-xs text-conf-high"></span>
+      </div>
+    </div>
+
+    <!-- Paste-notes mode -->
+    <div x-show="mode==='paste'" x-cloak>
+      <input x-model="pasteTitle" placeholder="Title (optional, e.g. source call 5/29)"
+             class="w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm mb-2">
+      <textarea x-model="pasteText" rows="8" placeholder="Paste investigative notes, a chat log, a transcript, anything. It becomes a report and gets entity-extracted."
+                class="w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm font-mono"></textarea>
+      <div class="flex items-center gap-3 mt-3">
+        <button @click="paste()" :disabled="busy || !pasteText.trim() || (!hasCase && !caseName.trim())"
+                class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed">
+          <span x-show="!busy">Add notes</span>
+          <span x-show="busy" x-cloak>Extracting…</span>
+        </button>
+        <span x-show="!hasCase && !caseName.trim() && pasteText.trim()" x-cloak class="text-xs text-ink-faint">Name a case above to enable.</span>
+        <span x-show="error" x-cloak x-text="error" class="text-xs text-sev-high"></span>
+        <span x-show="done" x-cloak x-text="done" class="text-xs text-conf-high"></span>
+      </div>
+    </div>
+  </div>
+
+  {% include "_process_panel.html" %}
+
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-4 py-2">Title</th>
+          <th class="text-left px-4 py-2">Type</th>
+          <th class="text-left px-4 py-2">Investigation</th>
+          <th class="text-right px-4 py-2">Entities</th>
+          <th class="text-right px-4 py-2">Assets</th>
+          <th class="text-right px-4 py-2">Ingested</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        {% for r in reports %}
+        <tr class="hover:bg-bg-soft cursor-pointer" onclick="window.location='/reports/{{ r.id }}'">
+          <td class="px-4 py-3 font-medium"><a href="/reports/{{ r.id }}" class="hover:text-accent">{{ r.title }}</a></td>
+          <td class="px-4 py-3"><span class="role-pill role-source">{{ r.source_type }}</span></td>
+          <td class="px-4 py-3 text-ink-muted">{{ r.investigation or '—' }}</td>
+          <td class="px-4 py-3 text-right font-mono">{{ r.entity_count }}</td>
+          <td class="px-4 py-3 text-right font-mono">{{ r.asset_count }}</td>
+          <td class="px-4 py-3 text-right font-mono text-xs text-ink-muted">{{ r.ingested_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// A single case active means uploads file there automatically; otherwise the
+// analyst must name a case (gates the button below).
+const HAS_CASE = {{ 'true' if (nav and nav.active_case) else 'false' }};
+const CASE_OBJECTIVE = {{ (objective or '') | tojson }};
+function uploadView() {
+  return {
+    mode: 'files',
+    pasteText: '', pasteTitle: '', objective: CASE_OBJECTIVE,
+    files: [], busy: false, error: '', done: '', caseName: '', hover: false, hasCase: HAS_CASE,
+    addFiles(list) {
+      const incoming = Array.from(list);
+      const names = new Set(this.files.map(f => f.name));
+      this.files = [...this.files, ...incoming.filter(f => !names.has(f.name))];
+    },
+    async upload() {
+      if (!this.files.length || this.busy) return;
+      this.busy = true; this.error = ''; this.done = '';
+      const fd = new FormData();
+      this.files.forEach(f => fd.append('files', f));
+      if (this.caseName && this.caseName.trim()) fd.append('investigation', this.caseName.trim());
+      if (this.objective && this.objective.trim()) fd.append('objective', this.objective.trim());
+      try {
+        const r = await fetch('/api/upload', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.error) { this.error = d.error; this.busy = false; return; }
+        if (!d.ingested) {
+          const why = (d.skipped || []).map(s => s.file + ': ' + (s.error || s.note || 'skipped')).join('; ');
+          this.error = 'Nothing ingested — ' + (why || 'unsupported file type') +
+                       '. Supported: PDF, Word (.docx), images, CSV/TSV, XLSX, TXT, MD.';
+          this.busy = false; return;
+        }
+        this.done = 'Ingested ' + d.ingested + ' report(s)' +
+                    (d.open_contradictions ? ', ' + d.open_contradictions + ' correction(s) to review' : '') + '. Opening…';
+        // Land in the case the files were filed under (creates the switch if new).
+        setTimeout(() => { window.location = '/select-case/' + d.case; }, 900);
+      } catch (e) {
+        this.error = 'Upload failed.'; this.busy = false;
+      }
+    },
+    async paste() {
+      if (!this.pasteText.trim() || this.busy) return;
+      this.busy = true; this.error = ''; this.done = '';
+      const fd = new FormData();
+      fd.append('text', this.pasteText);
+      if (this.pasteTitle.trim()) fd.append('title', this.pasteTitle.trim());
+      if (this.caseName && this.caseName.trim()) fd.append('investigation', this.caseName.trim());
+      if (this.objective && this.objective.trim()) fd.append('objective', this.objective.trim());
+      try {
+        const r = await fetch('/api/paste', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.error) { this.error = d.error; this.busy = false; return; }
+        if (!d.ingested) { this.error = 'Nothing extracted from the notes.'; this.busy = false; return; }
+        this.done = 'Added. Opening…';
+        setTimeout(() => { window.location = '/select-case/' + d.case; }, 900);
+      } catch (e) {
+        this.error = 'Save failed.'; this.busy = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

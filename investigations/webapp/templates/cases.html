@@ -1,0 +1,151 @@
+{% extends "_layout.html" %}
+{% block title %}Cases · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto" x-data="newCase()">
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-semibold">Investigations</h1>
+      <p class="text-sm text-ink-muted mt-1">Pick a case to scope every view to it. Entities stay global; views filter to the case.</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="/simple"
+         class="text-sm px-3 py-1.5 bg-bg-card border border-accent/40 text-accent rounded hover:bg-bg-soft"
+         title="One seed in — watch the investigator build it out. No setup.">
+        ⚡ Quick look
+      </a>
+      <button @click="open = !open"
+              class="text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">
+        + New case
+      </button>
+      <a href="/select-case/__all__"
+         class="text-sm px-3 py-1.5 bg-bg-card border border-bg-border rounded hover:bg-bg-soft">
+        View all cases →
+      </a>
+    </div>
+  </div>
+
+  <div x-show="open" class="bg-bg-card border border-bg-border rounded-lg p-5 mb-6">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div>
+        <label class="block text-xs text-ink-muted mb-1">Case name</label>
+        <input x-model="name" @keydown.enter="create()" placeholder="e.g. case-a-iranian-hacktivists"
+               class="w-full px-3 py-2 text-sm bg-bg-soft border border-bg-border rounded focus:border-accent outline-none">
+      </div>
+      <div>
+        <label class="block text-xs text-ink-muted mb-1">Client <span class="text-ink-faint">(optional)</span></label>
+        <input x-model="client" @keydown.enter="create()" placeholder="e.g. Acme Intel"
+               class="w-full px-3 py-2 text-sm bg-bg-soft border border-bg-border rounded focus:border-accent outline-none">
+      </div>
+    </div>
+    <div class="flex items-center gap-3 mt-3">
+      <button @click="create()" :disabled="busy || !name.trim()"
+              class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+        <span x-show="!busy">Create + add evidence</span>
+        <span x-show="busy">Creating…</span>
+      </button>
+      <span x-show="error" x-text="error" class="text-sm text-sev-high"></span>
+    </div>
+  </div>
+
+  {% if not cases %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-8 text-center">
+    <p class="text-ink-muted mb-4">No cases yet. Upload your first evidence to start a case —
+       drop a PDF, Word doc, image, or spreadsheet and name the case.</p>
+    <a href="/reports" class="inline-block text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover">Upload evidence →</a>
+  </div>
+  {% endif %}
+
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for c in cases %}
+    <a href="/select-case/{{ c.slug }}"
+       class="relative block bg-bg-card border border-bg-border rounded-lg p-5 hover:bg-bg-soft hover:border-accent/50 transition">
+      <!-- Delete: gated behind a confirm dialog. .prevent.stop so it never navigates. -->
+      <button @click.prevent.stop="askDelete('{{ c.slug }}', '{{ c.case_name or c.slug }}')"
+              title="Delete this investigation"
+              class="absolute top-2 right-2 text-ink-faint hover:text-sev-high text-xs px-1.5 py-0.5 rounded hover:bg-sev-high/10">✕</button>
+      <div class="flex items-start justify-between mb-2 pr-6">
+        <span class="font-mono font-semibold text-accent">{{ c.case_name or c.slug }}</span>
+        <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded
+                     {% if c.status == 'active' %}bg-green-500/15 text-conf-high{% else %}bg-gray-500/15 text-ink-muted{% endif %}">
+          {{ c.status }}
+        </span>
+      </div>
+      {% if c.client %}<div class="text-xs text-ink-muted mb-3">{{ c.client }}</div>{% endif %}
+      {% if c.investigation_type %}
+      <div class="mb-2">
+        <span class="text-xs px-2 py-0.5 bg-accent/10 text-accent rounded font-medium" title="investigation type (from the Understand step)">{{ c.investigation_type }}</span>
+        {% if c.schema_status and c.schema_status != 'approved' %}<span class="text-[10px] text-sev-med ml-1">schema {{ c.schema_status }}</span>{% endif %}
+      </div>
+      {% elif c.report_count %}
+      <div class="mb-2"><span class="text-xs text-ink-faint">type not identified yet · run Understand</span></div>
+      {% endif %}
+      <div class="flex items-center gap-4 text-xs text-ink-muted mt-3">
+        <span>{{ c.report_count }} report{{ '' if c.report_count == 1 else 's' }}</span>
+        {% if c.last_activity %}<span class="font-mono">{{ c.last_activity[:10] }}</span>{% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+
+  <!-- Delete confirmation: one-click gate. Nothing fires until Confirm. -->
+  <div x-show="delSlug" x-cloak @keydown.escape.window="delSlug = ''"
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+    <div @click.outside="delSlug = ''" class="bg-bg-card border border-bg-border rounded-lg p-6 max-w-md w-full">
+      <h3 class="text-lg font-semibold text-ink mb-2">Delete this entire investigation?</h3>
+      <p class="text-sm text-ink-muted mb-1">You're about to permanently delete
+        <span class="font-mono text-accent" x-text="delName"></span>.</p>
+      <p class="text-sm text-ink-muted mb-5">This removes <strong>all of its reports, entities, findings, and the brief</strong>. This cannot be undone.</p>
+      <div class="flex items-center justify-end gap-3">
+        <button @click="delSlug = ''" :disabled="deleting"
+                class="text-sm px-4 py-2 border border-bg-border rounded hover:bg-bg-soft disabled:opacity-50">Cancel</button>
+        <button @click="doDelete()" :disabled="deleting"
+                class="text-sm px-4 py-2 bg-sev-high text-white rounded hover:opacity-90 disabled:opacity-50">
+          <span x-show="!deleting">Delete investigation</span>
+          <span x-show="deleting" x-cloak>Deleting…</span>
+        </button>
+      </div>
+      <p x-show="delError" x-cloak x-text="delError" class="text-sm text-sev-high mt-3"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+function newCase() {
+  return {
+    open: false, name: '', client: '', busy: false, error: '',
+    delSlug: '', delName: '', deleting: false, delError: '',
+    askDelete(slug, name) { this.delSlug = slug; this.delName = name; this.delError = ''; },
+    async doDelete() {
+      if (!this.delSlug || this.deleting) return;
+      this.deleting = true; this.delError = '';
+      const fd = new FormData();
+      fd.append('investigation', this.delSlug);
+      try {
+        const r = await fetch('/api/investigation/delete', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.error) { this.delError = d.error; this.deleting = false; return; }
+        window.location.reload();
+      } catch (e) {
+        this.delError = 'Could not delete the investigation.'; this.deleting = false;
+      }
+    },
+    async create() {
+      if (!this.name.trim() || this.busy) return;
+      this.busy = true; this.error = '';
+      const fd = new FormData();
+      fd.append('name', this.name.trim());
+      if (this.client.trim()) fd.append('client', this.client.trim());
+      try {
+        const r = await fetch('/api/cases', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.error) { this.error = d.error; this.busy = false; return; }
+        // Case is created + now active. Land on Reports to add evidence.
+        window.location = '/reports';
+      } catch (e) {
+        this.error = 'Could not create the case.'; this.busy = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

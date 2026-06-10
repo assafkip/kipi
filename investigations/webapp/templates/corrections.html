@@ -1,0 +1,78 @@
+{% extends "_layout.html" %}
+{% block title %}Corrections · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="correctionsView()" x-init="load()" class="max-w-5xl mx-auto">
+  {% include "_signals_views.html" %}
+  <div class="mb-4">
+    <h1 class="text-xl font-semibold">Corrections</h1>
+    <p class="text-sm text-ink-muted mt-1">
+      Where a newer report contradicts an older one. Pick the authoritative claim — the others are
+      marked superseded (kept for audit), and the graph reprojects. Nothing is deleted.
+      {% if nav and nav.active_case %}Scoped to <span class="font-mono text-accent">{{ nav.active_case }}</span>.{% endif %}
+    </p>
+  </div>
+
+  <div x-show="contradictions.length === 0" class="bg-bg-card border border-bg-border rounded-lg p-8 text-center text-ink-muted">
+    No contradictions to review. As reports disagree about an actor's role, attributes, or connections,
+    the conflicts surface here.
+  </div>
+
+  <div class="space-y-3">
+    <template x-for="c in contradictions" :key="c.entity_id + ':' + c.predicate">
+      <div class="bg-bg-card border border-amber-500/40 rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-sev-med" x-text="c.claim_type"></span>
+          <a :href="'/entity/' + c.entity_id" class="font-mono font-semibold hover:text-accent" x-text="c.entity_name"></a>
+          <span class="text-ink-muted text-sm" x-text="'— ' + c.label"></span>
+        </div>
+        <div class="text-xs text-ink-muted mb-2">Reports disagree. Choose the authoritative claim:</div>
+        <div class="space-y-2">
+          <template x-for="cl in c.claims" :key="cl.id">
+            <div class="flex items-start gap-3 bg-bg-soft border border-bg-border rounded p-2.5">
+              <div class="flex-1 min-w-0">
+                <div class="text-sm"><span class="text-ink-muted">asserts:</span> <span class="font-mono text-ink" x-text="cl.value"></span></div>
+                <div class="text-xs text-ink-muted mt-0.5">
+                  <span x-text="cl.report_title || ('report ' + cl.report_id)"></span>
+                  <span x-show="cl.investigation" class="font-mono" x-text="' [' + cl.investigation + ']'"></span>
+                  <span x-show="cl.confidence" x-text="' · ' + cl.confidence"></span>
+                </div>
+                <div x-show="cl.evidence" class="text-xs text-ink-faint mt-1 italic" x-text="cl.evidence"></div>
+              </div>
+              <div class="flex flex-col gap-1">
+                <button @click="resolve(cl.id)"
+                        class="text-xs px-2.5 py-1 bg-accent text-white rounded hover:bg-accent-hover whitespace-nowrap">
+                  Make authoritative
+                </button>
+                <button @click="reject(cl.id)"
+                        class="text-xs px-2.5 py-1 text-sev-high hover:text-sev-high whitespace-nowrap">
+                  Reject
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script>
+function correctionsView() {
+  return {
+    contradictions: [],
+    async load() {
+      const d = await fetch('/api/corrections').then(r => r.json());
+      this.contradictions = d.contradictions || [];
+    },
+    async resolve(id) {
+      await fetch('/api/claims/' + id + '/resolve', { method: 'POST' });
+      location.reload();  // refresh list + nav badge + reprojected graph
+    },
+    async reject(id) {
+      await fetch('/api/claims/' + id + '/reject', { method: 'POST' });
+      location.reload();
+    },
+  }
+}
+</script>
+{% endblock %}

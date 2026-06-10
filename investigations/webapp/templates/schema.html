@@ -1,0 +1,258 @@
+{% extends "_layout.html" %}
+{% block title %}Schema · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto" x-data="schemaEditor()">
+
+  <!-- Header + status -->
+  <div class="flex items-start justify-between gap-3 mb-4">
+    <div class="min-w-0">
+      <h1 class="font-display text-xl font-semibold text-ink">Entity schema</h1>
+      <p class="text-sm text-ink-muted mt-0.5">
+        A schema is the list of who and what your case is about — the kinds of people, accounts, and infrastructure. We sort findings into it so they stay organized. The agent suggests one; you approve or edit it, and you can change it any time.
+      </p>
+    </div>
+    <div class="shrink-0 text-right">
+      <span class="role-pill"
+            :class="status === 'approved' ? 'role-infra' : (status === 'proposed' ? 'role-operator' : 'role-source')"
+            x-text="status === 'approved' ? 'APPROVED' : (status === 'proposed' ? 'PROPOSED' : 'DEFAULT')"></span>
+      {% if case %}<div class="text-xs text-ink-faint font-mono mt-1">{{ case }}</div>{% endif %}
+    </div>
+  </div>
+
+  {% if not case %}
+  <div class="bg-yellow-500/10 border border-yellow-500/40 rounded-lg p-4 mb-4 text-sm text-ink">
+    Pick a <strong>single case</strong> (top-right) to view or build its schema. The schema is per-case.
+  </div>
+  {% endif %}
+
+  <!-- Gate banner -->
+  <template x-if="status !== 'approved'">
+    <div class="bg-accent/5 border border-accent/30 rounded-lg p-3 mb-4 text-sm text-ink flex items-start gap-2">
+      <span class="text-accent leading-none">●</span>
+      <div>
+        <span x-show="status === 'default'">No schema yet for this case. Run <strong>Understand</strong> to have the agent read the case and propose one.</span>
+        <span x-show="status === 'proposed'">Proposed — review + edit below, then <strong>Approve</strong>. Process won't classify until you do.</span>
+      </div>
+    </div>
+  </template>
+  {% if approved_by %}
+  <div class="text-xs text-ink-faint mb-4">Approved by {{ approved_by }}{% if approved_at %} · {{ approved_at }}{% endif %}</div>
+  {% endif %}
+
+  <!-- Objective: the scope anchor. Editing it here + re-running Understand re-scopes
+       the proposed schema around the goal. Steers the investigator + brief too. -->
+  {% if case %}
+  <div x-data="{ obj: {{ (objective or '') | tojson | forceescape }}, saved: false, saving: false,
+                 async save() { this.saving = true; const fd = new FormData(); fd.append('objective', this.obj);
+                   try { const r = await fetch('/api/objective', { method: 'POST', body: fd }); await r.json();
+                     this.saved = true; setTimeout(() => this.saved = false, 2500); } finally { this.saving = false; } } }"
+       class="bg-bg-card border border-bg-border rounded-lg p-4 mb-5">
+    <label class="block text-xs uppercase tracking-wider text-ink-muted mb-1">Objective
+      <span class="text-ink-faint normal-case">— the scope anchor. Shapes this schema, steers the investigator, frames the brief.</span></label>
+    <textarea x-model="obj" rows="2" placeholder="What is this investigation trying to establish?"
+              class="w-full bg-bg-soft border border-bg-border rounded px-3 py-2 text-sm"></textarea>
+    <div class="flex items-center gap-3 mt-2">
+      <button @click="save()" :disabled="saving"
+              class="text-sm px-3 py-1.5 border border-bg-border rounded hover:bg-bg-soft disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-show="!saving">Save objective</span><span x-show="saving" x-cloak>Saving…</span>
+      </button>
+      <span x-show="saved" x-cloak class="text-xs text-conf-high">Saved. Re-run Understand to re-scope the schema.</span>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Actions -->
+  <div class="flex flex-wrap items-center gap-2 mb-5">
+    <button :disabled="busy || !{{ 'true' if case else 'false' }}"
+            @click="understand()"
+            class="text-sm px-3 py-2 border border-bg-border rounded hover:bg-bg-soft disabled:opacity-50 disabled:cursor-not-allowed">
+      <span x-show="!busy">Run Understand{{ ' (re-propose)' if schema_status in ['proposed','approved'] else '' }}</span>
+      <span x-show="busy" x-cloak>Working…</span>
+    </button>
+    <button :disabled="busy || !{{ 'true' if case else 'false' }}"
+            @click="approveAndProcess()"
+            class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+      <span x-show="!busy">Approve &amp; Process</span>
+      <span x-show="busy" x-cloak x-text="msg"></span>
+    </button>
+    <button :disabled="busy || !{{ 'true' if case else 'false' }}"
+            @click="approve()"
+            class="text-sm px-3 py-2 border border-bg-border rounded hover:bg-bg-soft disabled:opacity-50 disabled:cursor-not-allowed">
+      Approve only
+    </button>
+    <span class="text-xs text-ink-muted" x-show="!busy" x-text="msg"></span>
+  </div>
+
+  <!-- Investigation type (coarse label, detected at ingest) -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <label class="block text-xs font-medium text-ink-muted mb-1">Investigation type
+      <span class="text-ink-faint font-normal">— detected from the evidence; the badge + schema seed</span></label>
+    <div class="flex items-center gap-2">
+      <input x-model="invType" list="type-opts" placeholder="e.g. crypto-fraud"
+             class="flex-1 text-sm border border-bg-border rounded px-2 py-1.5 bg-bg-soft focus:bg-white">
+      <datalist id="type-opts">
+        {% for t in type_options %}<option value="{{ t }}">{% endfor %}
+      </datalist>
+      {% if inv_type %}
+      <span class="text-xs text-ink-faint shrink-0">{{ '%.0f'|format((inv_type.confidence or 0)*100) }}% · {{ inv_type.status }}</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Domain + summary -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4 space-y-3">
+    <div>
+      <label class="block text-xs font-medium text-ink-muted mb-1">Domain <span class="text-ink-faint font-normal">— the fine, freeform description</span></label>
+      <input x-model="s.domain" placeholder="e.g. crypto rug-pull network"
+             class="w-full text-sm border border-bg-border rounded px-2 py-1.5 bg-bg-soft focus:bg-white">
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-ink-muted mb-1">Summary</label>
+      <textarea x-model="s.summary" rows="2" placeholder="What is this case about?"
+                class="w-full text-sm border border-bg-border rounded px-2 py-1.5 bg-bg-soft focus:bg-white"></textarea>
+    </div>
+  </div>
+
+  <!-- Roles -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-semibold text-ink">Roles <span class="text-ink-faint font-normal">— the buckets every entity is sorted into</span></h2>
+      <button @click="addRole()" class="text-xs text-accent hover:underline">+ role</button>
+    </div>
+    <div class="text-xs text-ink-faint mb-2">Tick <strong>actor</strong> for human/persona roles — those get a function (sub-role). <strong>Weight</strong> 0-5 sets how much the role lifts the threat-score ranking. Keep a <code class="kbd">noise</code> role for junk.</div>
+    <template x-for="(r, i) in s.roles" :key="i">
+      <div class="flex items-center gap-2 mb-2">
+        <input x-model="r.name" placeholder="role"
+               class="w-28 text-sm font-mono border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <input x-model="r.description" placeholder="what this role means"
+               class="flex-1 text-sm border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <label class="flex items-center gap-1 text-xs text-ink-muted shrink-0" title="weight 0-5">
+          <span class="text-ink-faint">wt</span>
+          <input type="number" min="0" max="5" x-model.number="r.weight"
+                 class="w-12 text-sm border border-bg-border rounded px-1 py-1 bg-bg-soft focus:bg-white">
+        </label>
+        <label class="flex items-center gap-1 text-xs text-ink-muted shrink-0">
+          <input type="checkbox" x-model="r.actor"> actor
+        </label>
+        <button @click="delRole(i)" class="text-ink-faint hover:text-sev-high text-sm shrink-0" title="remove">✕</button>
+      </div>
+    </template>
+  </div>
+
+  <!-- Sub-roles -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-semibold text-ink">Sub-roles <span class="text-ink-faint font-normal">— function for actor roles</span></h2>
+      <button @click="addSub()" class="text-xs text-accent hover:underline">+ sub-role</button>
+    </div>
+    <template x-for="(s2, i) in s.sub_roles" :key="i">
+      <div class="flex items-center gap-2 mb-2">
+        <input x-model="s2.name" placeholder="sub-role"
+               class="w-32 text-sm font-mono border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <input x-model="s2.description" placeholder="who they are in the network"
+               class="flex-1 text-sm border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <button @click="delSub(i)" class="text-ink-faint hover:text-sev-high text-sm shrink-0" title="remove">✕</button>
+      </div>
+    </template>
+  </div>
+
+  <!-- Entity types -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-semibold text-ink">Entity types <span class="text-ink-faint font-normal">— the kinds of things that matter here</span></h2>
+      <button @click="addType()" class="text-xs text-accent hover:underline">+ type</button>
+    </div>
+    <template x-for="(t, i) in s.entity_types" :key="i">
+      <div class="flex items-center gap-2 mb-2">
+        <input x-model="t.name" placeholder="type"
+               class="w-32 text-sm font-mono border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <input x-model="t.description" placeholder="description"
+               class="flex-1 text-sm border border-bg-border rounded px-2 py-1 bg-bg-soft focus:bg-white">
+        <button @click="delType(i)" class="text-ink-faint hover:text-sev-high text-sm shrink-0" title="remove">✕</button>
+      </div>
+    </template>
+  </div>
+
+  <!-- Noise -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+    <label class="block text-sm font-semibold text-ink mb-1">Noise rules</label>
+    <textarea x-model="s.noise_notes" rows="2" placeholder="What counts as junk in this case?"
+              class="w-full text-sm border border-bg-border rounded px-2 py-1.5 bg-bg-soft focus:bg-white"></textarea>
+  </div>
+
+</div>
+
+<script>
+  // Inject as JS objects (tojson's double-quotes break inside x-data="..." attrs).
+  window.__schema = {{ schema|tojson }};
+  window.__schemaStatus = {{ schema_status|tojson }};
+  window.__schemaHasCase = {{ ('true' if case else 'false') }};
+  window.__invType = {{ (inv_type.type if inv_type else (schema.domain or ''))|tojson }};
+  window.schemaEditor = function () {
+    const base = JSON.parse(JSON.stringify(window.__schema || {}));
+    base.entity_types = base.entity_types || [];
+    base.roles = base.roles || [];
+    base.sub_roles = base.sub_roles || [];
+    return {
+      s: base,
+      status: window.__schemaStatus,
+      hasCase: window.__schemaHasCase,
+      invType: window.__invType || '',
+      busy: false, msg: '',
+      addType() { this.s.entity_types.push({ name: '', description: '' }); },
+      delType(i) { this.s.entity_types.splice(i, 1); },
+      addRole() { this.s.roles.push({ name: '', description: '', actor: false, weight: 2 }); },
+      delRole(i) { this.s.roles.splice(i, 1); },
+      addSub() { this.s.sub_roles.push({ name: '', description: '' }); },
+      delSub(i) { this.s.sub_roles.splice(i, 1); },
+      understand() {
+        if (!this.hasCase) { this.msg = 'Pick a single case first'; return; }
+        this.busy = true; this.msg = 'Reading the case + proposing…';
+        fetch('/api/understand', { method: 'POST' }).then(r => r.json()).then(d => {
+          if (d.error) { this.msg = d.error; this.busy = false; return; }
+          const ns = d.schema || {};
+          ns.entity_types = ns.entity_types || [];
+          ns.roles = ns.roles || [];
+          ns.sub_roles = ns.sub_roles || [];
+          this.s = ns; this.status = 'proposed'; this.busy = false;
+          this.msg = 'Proposed — review, edit, then Approve';
+        }).catch(() => { this.msg = 'Failed — try again'; this.busy = false; });
+      },
+      approve() {
+        if (!this.hasCase) { this.msg = 'Pick a single case first'; return; }
+        const roles = (this.s.roles || []).filter(r => (r.name || '').trim());
+        if (!roles.length) { this.msg = 'Add at least one role'; return; }
+        this.busy = true; this.msg = 'Saving…';
+        fetch('/api/schema/approve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schema: this.s, investigation_type: this.invType }),
+        }).then(r => r.json()).then(d => {
+          if (d.error) { this.msg = d.error; this.busy = false; return; }
+          this.status = 'approved'; this.busy = false;
+          this.msg = 'Approved — Process will now classify with this schema';
+        }).catch(() => { this.msg = 'Failed — try again'; this.busy = false; });
+      },
+      // One forward motion: approve the schema, kick off the pipeline, and land on
+      // Reports where the live progress panel resumes the running job. No backtrack.
+      approveAndProcess() {
+        if (!this.hasCase) { this.msg = 'Pick a single case first'; return; }
+        const roles = (this.s.roles || []).filter(r => (r.name || '').trim());
+        if (!roles.length) { this.msg = 'Add at least one role'; return; }
+        this.busy = true; this.msg = 'Approving…';
+        fetch('/api/schema/approve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schema: this.s, investigation_type: this.invType }),
+        }).then(r => r.json()).then(d => {
+          if (d.error) { this.msg = d.error; this.busy = false; return null; }
+          this.status = 'approved'; this.msg = 'Starting processing…';
+          return fetch('/api/process', { method: 'POST' }).then(r => r.json());
+        }).then(d => {
+          if (!d) return;                       // approve failed; already surfaced
+          if (d.error) { this.msg = d.error; this.busy = false; return; }
+          window.location = '/reports';         // live progress panel takes over
+        }).catch(() => { this.msg = 'Failed — try again'; this.busy = false; });
+      },
+    };
+  };
+</script>
+{% endblock %}

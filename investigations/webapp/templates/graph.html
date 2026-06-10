@@ -1,0 +1,1934 @@
+{% extends "_layout.html" %}
+{% block title %}Graph · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="graphController()" x-init="init()"
+     class="h-[calc(100vh-5.5rem)] min-h-[480px] flex -mx-4 -my-5 border-t border-bg-border">
+
+  <!-- Filters sidebar -->
+  <aside class="w-72 bg-bg-card border-r border-bg-border p-4 overflow-y-auto shrink-0">
+    <h2 class="text-sm font-semibold mb-3 text-ink uppercase tracking-wider">Filters</h2>
+
+    <!-- Add your own node: name + type + thumbnail, optionally linked to selection. -->
+    <div class="mb-4">
+      <button @click="showAdd = !showAdd"
+              class="w-full text-xs px-3 py-1.5 rounded border border-accent/60 text-accent font-medium hover:bg-accent hover:text-white"
+              x-text="showAdd ? 'Cancel' : '+ Add a node'"></button>
+      <div x-show="showAdd" x-cloak class="mt-2 space-y-2 bg-bg-soft border border-bg-border rounded p-2">
+        <input x-model="newNode.name" placeholder="name — @actor, evil.com, 1.2.3.4…"
+               class="w-full bg-bg-card border border-bg-border rounded px-2 py-1 text-sm">
+        <select x-model="newNode.type" class="w-full bg-bg-card border border-bg-border rounded px-2 py-1 text-sm">
+          <template x-for="t in nodeTypes" :key="t"><option :value="t" x-text="t"></option></template>
+        </select>
+        <input x-model="newNode.thumbnail" placeholder="thumbnail image URL (optional)"
+               class="w-full bg-bg-card border border-bg-border rounded px-2 py-1 text-sm">
+        <label x-show="selected" class="flex items-center gap-2 text-xs text-ink-muted cursor-pointer">
+          <input type="checkbox" x-model="newNode.link" class="accent-accent">
+          link to <span class="font-mono truncate" x-text="selected?.full_name"></span>
+        </label>
+        <div x-show="addError" x-cloak x-text="addError" class="text-xs text-sev-high"></div>
+        <button @click="addManualNode()" :disabled="!newNode.name.trim()"
+                class="w-full text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed">
+          Add to graph
+        </button>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Min threat score</label>
+      <input type="range" min="0" max="100" step="5" x-model.number="minScore"
+             @input.debounce.300ms="reload()" class="w-full accent-accent">
+      <div class="text-xs text-ink-muted mt-1 font-mono">≥ <span x-text="minScore"></span></div>
+    </div>
+
+    <!-- Search: jump to any node by name. -->
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Search node</label>
+      <div class="flex gap-1">
+        <input x-model="nodeSearch" @keydown.enter="searchNode()" @input="nodeSearchMsg=''"
+               placeholder="name / domain / wallet…"
+               class="flex-1 min-w-0 bg-bg-soft border border-bg-border rounded px-2 py-1 text-sm focus:border-accent outline-none">
+        <button @click="searchNode()" class="shrink-0 text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent-hover">Go</button>
+        <button x-show="cy && cy.elements('.facet-match').length" x-cloak @click="clearSearch()"
+                title="Clear search (Esc)"
+                class="shrink-0 text-xs px-2 py-1 bg-bg-soft border border-bg-border rounded hover:bg-bg-border">Clear</button>
+      </div>
+      <div x-show="nodeSearchMsg" x-cloak class="text-[11px] text-ink-faint mt-1" x-text="nodeSearchMsg"></div>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Role</label>
+      <select x-model="role" @change="highlightFacets()"
+              class="w-full bg-bg-soft border border-bg-border rounded px-2 py-1 text-sm">
+        <option value="">all roles</option>
+        <template x-for="r in roleFacet" :key="r.key">
+          <option :value="r.key" x-text="r.key + ' (' + r.n + ')'"></option>
+        </template>
+      </select>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Type</label>
+      <select x-model="etype" @change="highlightFacets()"
+              class="w-full bg-bg-soft border border-bg-border rounded px-2 py-1 text-sm">
+        <option value="">all types</option>
+        <template x-for="t in entityTypes" :key="t.etype">
+          <option :value="t.etype" x-text="t.etype + ' (' + t.n + ')'"></option>
+        </template>
+      </select>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Origin</label>
+      <select x-model="originFilter" @change="highlightFacets()"
+              class="w-full bg-bg-soft border border-bg-border rounded px-2 py-1 text-sm">
+        <option value="">all origins</option>
+        <template x-for="o in originFacet" :key="o.key">
+          <option :value="o.key" x-text="o.label + ' (' + o.n + ')'"></option>
+        </template>
+      </select>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-xs text-ink-muted block mb-1">Cluster</label>
+      <select x-model.number="clusterId" @change="highlightFacets()"
+              class="w-full bg-bg-soft border border-bg-border rounded px-2 py-1 text-sm">
+        <option :value="null">all clusters</option>
+        <template x-for="c in clusters" :key="c.id">
+          <option :value="c.id" x-text="c.name + ' (' + c.n + ')'"></option>
+        </template>
+      </select>
+    </div>
+
+    <label class="flex items-center gap-2 mb-2 text-xs text-ink-muted cursor-pointer">
+      <input type="checkbox" x-model="inClusterOnly" @change="reload()" class="accent-accent" :disabled="showAll">
+      Only nodes in a cluster
+    </label>
+
+    <label class="flex items-center gap-2 mb-2 text-xs cursor-pointer"
+           :class="meaningfulOnly ? 'text-accent font-medium' : 'text-ink-muted'">
+      <input type="checkbox" x-model="meaningfulOnly" @change="reload()" class="accent-accent">
+      Meaningful only (hide unconnected junk)
+    </label>
+
+    <label class="flex items-center gap-2 mb-2 text-xs cursor-pointer"
+           :class="coOccurrence ? 'text-accent font-medium' : 'text-ink-muted'">
+      <input type="checkbox" x-model="coOccurrence" @change="reload()" class="accent-accent">
+      Show "same pic" links (co-occurrence)
+    </label>
+
+    <label class="flex items-center gap-2 mb-4 text-xs cursor-pointer"
+           :class="showAll ? 'text-accent font-medium' : 'text-ink-muted'">
+      <input type="checkbox" x-model="showAll" @change="reload()" class="accent-accent">
+      Show all (drop score + cluster filters)
+    </label>
+
+    <div class="space-y-1.5 text-xs mb-4">
+      <div class="text-ink-muted uppercase tracking-wider mb-1">Node encoding</div>
+      <div class="text-ink-muted leading-snug">Fill = primary cluster color (distinct per cluster)</div>
+      <div class="text-ink-muted leading-snug">Each dot is an entity. Each line is a connection between two.</div>
+      <div class="text-ink-muted leading-snug">Border color = role · shape = role type</div>
+      <div class="text-ink-muted leading-snug">Border style = origin (below)</div>
+      <div class="mt-3 text-ink-muted uppercase tracking-wider mb-1">Lines (connections)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-5 border-t-2 border-ink"></span> a known link (e.g. hosts, registered-by, pays); the arrow shows direction</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-5 border-t border-dotted border-ink-faint"></span> appeared together (same report / image), not yet a confirmed link</div>
+      <div class="mt-3 text-ink-muted uppercase tracking-wider mb-1">Origin</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 rounded-full" style="border:2px solid #1A1A19;background:#A7CFCB"></span> from intake (solid border)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 rounded-full" style="border:2px dashed #1A1A19;background:#A7CFCB"></span> detective investigated/added (dashed)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 rounded-full" style="border:2px dotted #1A1A19;background:#A7CFCB"></span> added manually (dotted)</div>
+      <div class="mt-3 text-ink-muted uppercase tracking-wider mb-1">Role / shape</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3 h-3 rounded-full" style="border:2px solid #C2410C;background:#A7CFCB"></span> operator (circle)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3 h-3 rotate-45" style="border:2px solid #7E22CE;background:#A7CFCB"></span> channel (diamond)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3 h-3" style="border:2px solid #B91C1C;background:#A7CFCB;clip-path:polygon(30% 0,70% 0,100% 30%,100% 70%,70% 100%,30% 100%,0 70%,0 30%)"></span> ioc (octagon)</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-3 h-3" style="border:2px solid #15803D;background:#A7CFCB"></span> infra (square)</div>
+      <div class="mt-3 text-ink-muted uppercase tracking-wider mb-1">Bridges</div>
+      <div class="flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-full" style="border:3px double #1A1A19;background:hsl(40 60% 55%)"></span> bridge node (2+ clusters)</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-0" style="border-top:2.5px solid #C2410C"></span> bridge edge</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-0" style="border-top:2px dashed #B91C1C"></span> strict cross-cluster</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-0" style="border-top:2px dotted #A8A29E"></span> "same pic" (co-occurrence)</div>
+      <div class="mt-3 text-ink-muted uppercase tracking-wider mb-1">Edge confidence</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-px" style="background:#15803D"></span> high</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-px" style="background:#B45309"></span> medium</div>
+      <div class="flex items-center gap-2"><span class="w-6 h-px" style="background:#8A847D"></span> low</div>
+    </div>
+
+    <div class="space-y-2 text-xs">
+      <div class="text-ink-muted uppercase tracking-wider mb-1">Stats</div>
+      <div class="text-ink">nodes: <span x-text="nodeCount"></span></div>
+      <div class="text-ink">edges: <span x-text="edgeCount"></span></div>
+    </div>
+
+    <div class="mt-4 space-y-2">
+      <div class="text-ink-muted uppercase tracking-wider text-xs mb-1">Layout</div>
+      <select x-model="layoutName" @change="reLayout()" data-testid="layout-switcher"
+              class="w-full text-xs px-2 py-1.5 bg-bg-soft border border-bg-border rounded">
+        <option value="cose">Force (cose)</option>
+        <template x-if="dagreOk"><option value="dagre">Hierarchy (dagre)</option></template>
+        <option value="concentric">Ego rings (concentric)</option>
+        <option value="circle">Circle</option>
+      </select>
+      <button @click="cy.fit(undefined, 50)" class="w-full text-xs px-3 py-1.5 bg-bg-soft border border-bg-border rounded hover:bg-bg-border">Fit view</button>
+      <button @click="reLayout()" class="w-full text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">Re-layout</button>
+      <button @click="togglePathMode()" data-testid="path-mode-toggle"
+              :class="pathMode ? 'bg-accent text-white' : 'bg-bg-soft border border-bg-border hover:bg-bg-border'"
+              class="w-full text-xs px-3 py-1.5 rounded">Path: pick two nodes</button>
+      <div x-show="pathMsg" x-cloak class="text-xs text-ink-muted" x-text="pathMsg"></div>
+    </div>
+
+    <!-- Conditional formatting: persisted per-case style rules (issue graph-style-rules) -->
+    <div class="mt-4" data-testid="style-rules-panel">
+      <button @click="rulesOpen = !rulesOpen" class="w-full text-left text-xs text-ink-muted uppercase tracking-wider hover:text-ink">
+        Style rules <span x-text="rulesOpen ? '▾' : '▸'"></span>
+      </button>
+      <div x-show="rulesOpen" x-cloak class="mt-2 space-y-1.5 text-xs">
+        <template x-for="(r, i) in styleRules" :key="r.id || i">
+          <div class="border border-bg-border rounded px-2 py-1.5"
+               :class="r.error ? 'border-red-400 bg-red-50' : 'bg-bg-soft'">
+            <div class="flex items-center gap-1.5">
+              <input type="checkbox" :checked="r.enabled" @change="rulesToggle(i)">
+              <span class="flex-1 truncate" :title="r.selector" x-text="r.label"></span>
+              <button @click="rulesEdit(i)" class="text-ink-muted hover:text-ink">edit</button>
+              <button @click="rulesDelete(i)" class="text-ink-muted hover:text-red-600">×</button>
+            </div>
+            <div x-show="r.error" x-cloak class="text-red-600 mt-0.5">rule rejected — skipped</div>
+            <div x-show="ruleEdit === i" x-cloak class="mt-1.5 space-y-1">
+              <input x-model="ruleDraft.label" placeholder="label" class="w-full px-1.5 py-1 border border-bg-border rounded">
+              <input x-model="ruleDraft.selector" placeholder="node[betweenness > 0.1]" class="w-full px-1.5 py-1 border border-bg-border rounded font-mono">
+              <textarea x-model="ruleDraft.styleText" rows="2" placeholder='{"background-color": "#7C3AED"}' class="w-full px-1.5 py-1 border border-bg-border rounded font-mono"></textarea>
+              <div class="flex gap-1.5">
+                <button @click="rulesSaveDraft()" class="px-2 py-1 bg-accent text-white rounded">Save</button>
+                <button @click="ruleEdit = null" class="px-2 py-1 border border-bg-border rounded">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div x-show="ruleEdit === -1" x-cloak class="border border-bg-border rounded px-2 py-1.5 space-y-1 bg-bg-soft">
+          <input x-model="ruleDraft.label" placeholder="label" class="w-full px-1.5 py-1 border border-bg-border rounded">
+          <input x-model="ruleDraft.selector" placeholder="node[betweenness > 0.1]" class="w-full px-1.5 py-1 border border-bg-border rounded font-mono">
+          <textarea x-model="ruleDraft.styleText" rows="2" placeholder='{"background-color": "#7C3AED"}' class="w-full px-1.5 py-1 border border-bg-border rounded font-mono"></textarea>
+          <div class="flex gap-1.5">
+            <button @click="rulesSaveDraft()" class="px-2 py-1 bg-accent text-white rounded">Add</button>
+            <button @click="ruleEdit = null" class="px-2 py-1 border border-bg-border rounded">Cancel</button>
+          </div>
+        </div>
+        <div class="flex gap-1.5 pt-1">
+          <button @click="rulesEdit(-1)" class="flex-1 px-2 py-1 border border-bg-border rounded hover:bg-bg-border">+ Add rule</button>
+          <button @click="rulesRestoreDefaults()" class="flex-1 px-2 py-1 border border-bg-border rounded hover:bg-bg-border">Restore defaults</button>
+        </div>
+        <div x-show="ruleMsg" x-cloak class="text-red-600" x-text="ruleMsg"></div>
+      </div>
+    </div>
+
+    <div class="mt-4 text-xs text-ink-muted">
+      <div class="mb-1 uppercase tracking-wider">Keys</div>
+      <div><span class="kbd">⌘K</span> search</div>
+      <div><span class="kbd">⏎</span> open entity</div>
+      <div><span class="kbd">esc</span> clear selection</div>
+    </div>
+  </aside>
+
+  <!-- Right column: graph canvas + the docked unified chat, split 50/50 so the
+       CONVERSATION leads (chat-primary, issue chat-primary-fallback) — you talk to the
+       investigator and watch the canvas build, not drive it with buttons. -->
+  <div class="flex-1 flex flex-col min-w-0">
+   <!-- Graph sub-area: canvas + a DOCKABLE right detail panel that pops in/out. -->
+   <div class="flex-[1] min-h-0 flex">
+    <div class="relative flex-1 min-w-0">
+    <!-- Blueprint dot-grid -->
+    <div id="cy" class="absolute inset-0"
+         style="background-color:#FAFAF9; background-image:radial-gradient(#E0DDD6 1px, transparent 1px); background-size:22px 22px;"></div>
+
+    <!-- Empty state — shows when filters/scope exclude everything -->
+    <div x-show="loaded && nodeCount === 0 && !runActive" x-cloak
+         class="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div class="bg-bg-card border border-bg-border rounded-lg shadow-card p-6 max-w-sm text-center pointer-events-auto">
+        <div class="text-base font-display font-semibold text-ink mb-1">Nothing to plot</div>
+        <p class="text-sm text-ink-muted mb-4">
+          No entities match the current filters
+          {% if nav and nav.active_case %}in <span class="font-mono text-accent">{{ nav.active_case }}</span>{% endif %}.
+          Lower the threshold or include un-clustered nodes.
+        </p>
+        <button @click="showEverything()"
+                class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover">Show everything</button>
+        {% if nav and nav.active_case %}
+        <a href="/select-case/__all__" class="block mt-2 text-xs text-ink-muted hover:text-accent">or widen to all cases →</a>
+        {% endif %}
+      </div>
+    </div>
+
+    </div><!-- /canvas box -->
+
+    <!-- Reopen tab — when something is selected but the panel was popped out. -->
+    <button x-show="(selected || selectedEdge) && !panelOpen" x-cloak @click="setPanel(true)"
+            class="shrink-0 self-start mt-3 px-1 py-4 bg-bg-card border border-r-0 border-bg-border rounded-l text-ink-muted hover:text-accent"
+            title="show details">‹</button>
+
+    <!-- Selected node panel — DOCKED right column, pops in/out (panelOpen). -->
+    <aside x-show="selected && panelOpen" x-cloak
+           class="w-96 shrink-0 bg-bg-card border-l border-bg-border overflow-y-auto relative"
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0">
+      <div class="p-4 border-b border-bg-border">
+        <div class="flex items-start justify-between mb-2">
+          <div>
+            <div class="role-pill" :class="'role-' + (selected?.role || '')" x-text="selected?.role || selected?.type"></div>
+            <h2 class="font-mono font-semibold text-lg mt-1" x-text="selected?.full_name"></h2>
+          </div>
+          <button @click="setPanel(false)" title="hide panel (tap a node to reopen)" class="text-ink-muted hover:text-ink text-lg leading-none">›</button>
+        </div>
+        <!-- What it is + where it came from -->
+        <div class="flex flex-wrap items-center gap-1.5 mt-2 text-[11px]">
+          <span class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border font-mono" x-text="selected?.type"></span>
+          <span class="px-1.5 py-0.5 rounded font-medium"
+                :class="(detail?.origin || selected?.origin) === 'osint' ? 'bg-accent/15 text-accent border border-accent/40'
+                        : (detail?.origin || selected?.origin) === 'manual' ? 'bg-bg-soft text-ink-muted border border-dashed border-bg-line'
+                        : 'bg-bg-soft text-ink-muted border border-bg-border'"
+                x-text="(detail?.origin || selected?.origin) === 'osint' ? 'detective investigated'
+                        : (detail?.origin || selected?.origin) === 'manual' ? 'added manually' : 'from intake'"></span>
+          <span x-show="detail?.sub_role" x-cloak class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border" x-text="detail?.sub_role"></span>
+        </div>
+        <div class="text-xs text-ink-muted grid grid-cols-3 gap-2 mt-2">
+          <div><div class="text-ink-muted">in / out (typed)</div><div class="font-mono"><span x-text="inCount"></span> / <span x-text="outCount"></span></div></div>
+          <div><div class="text-ink-muted">co-occurs</div><div class="font-mono" x-text="(detail?.co_occurs || []).length"></div></div>
+          <div><div class="text-ink-muted">reports</div><div class="font-mono" x-text="selected?.report_count || 0"></div></div>
+        </div>
+      </div>
+      <!-- Typed property sheet: the node's queryable facts (registrar, A-record, ASN…) as
+           real fields, written by the enrich adapters — not buried in the dossier prose. -->
+      <div x-show="detail && detail.properties && detail.properties.length" x-cloak class="p-4 border-b border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Properties</div>
+        <table class="w-full text-xs">
+          <template x-for="p in (detail?.properties || [])" :key="p.key">
+            <tr class="align-top">
+              <td class="py-0.5 pr-2 text-ink-muted font-mono whitespace-nowrap" x-text="p.key"></td>
+              <td class="py-0.5 font-mono text-ink break-all" x-text="p.value"></td>
+            </tr>
+          </template>
+        </table>
+      </div>
+
+      <!-- Provenance: how this node entered the graph (ingest / enrich:<provider> / agent / analyst). -->
+      <div x-show="detail && detail.provenance" x-cloak class="px-4 py-2 border-b border-bg-border text-[11px] text-ink-faint">
+        <span class="uppercase tracking-wider">source:</span>
+        <span class="font-mono" x-text="detail?.provenance"></span>
+      </div>
+
+      <!-- What the investigation found (incl. prose attributions that aren't graph nodes). -->
+      <div x-show="detail && detail.dossier" x-cloak class="p-4 border-b border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">What we found</div>
+        <div class="text-xs text-ink-muted leading-relaxed markdown"
+             x-html="renderMd((detail?.dossier || '').replace(/<!--\/?osint-->/g, '').trim())"></div>
+      </div>
+
+      <div class="p-4">
+        <a :href="'/entity/' + selected?.id"
+           class="block text-center bg-accent text-white px-3 py-2 rounded hover:bg-accent-hover text-sm font-medium">
+          Open full dossier →
+        </a>
+      </div>
+
+      <!-- Enrich this actor right from the graph; promote results into nodes. -->
+      <div class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Enrich</div>
+        <select x-model="enrichProvider"
+                class="w-full min-w-0 bg-bg-soft border border-bg-border rounded px-2 py-1.5 text-sm mb-2">
+          <template x-for="p in providers" :key="p.slug">
+            <option :value="p.slug" x-text="p.display_name + (p.configured ? '' : ' (needs key)')"></option>
+          </template>
+        </select>
+        <button @click="runEnrich()" :disabled="enrichBusy || !enrichProvider"
+                class="w-full mb-2 text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed font-medium">
+          <span x-show="!enrichBusy">Run enrichment</span><span x-show="enrichBusy" x-cloak>Running…</span>
+        </button>
+        <div x-show="enrichError" x-cloak x-text="enrichError" class="text-xs text-sev-high mb-2"></div>
+
+        <!-- Past lookups: click to view cached results — no re-search. -->
+        <div x-show="pastRuns.length" x-cloak class="mb-2">
+          <div class="text-[10px] text-ink-faint uppercase tracking-wider mb-1">Past lookups (click to view)</div>
+          <div class="flex flex-wrap gap-1">
+            <template x-for="run in pastRuns" :key="run.id">
+              <button @click="viewRun(run)"
+                      class="text-[10px] px-1.5 py-0.5 rounded border"
+                      :class="activeRunId === run.id ? 'border-accent text-accent bg-accent/10' : 'border-bg-border text-ink-muted hover:text-ink'"
+                      x-text="run.provider_slug + (run.mode ? ('·' + run.mode) : '') + ' (' + (run.results ? run.results.length : 0) + ')'"></button>
+            </template>
+          </div>
+        </div>
+
+        <div x-show="enrichResults.length" x-cloak class="space-y-1.5 max-h-80 overflow-y-auto">
+          <template x-for="res in enrichResults" :key="res.id">
+            <div class="text-xs bg-bg-soft border border-bg-border rounded p-2">
+              <div class="flex items-start gap-2">
+                <div class="min-w-0 flex-1 cursor-pointer" @click="res._open = !res._open" title="explore before adding">
+                  <div class="font-medium text-ink truncate" x-text="(res._open ? '▾ ' : '▸ ') + (res.title || res.result_type)"></div>
+                  <div x-show="!res._open" class="text-ink-muted" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" x-text="res.summary"></div>
+                </div>
+                <button x-show="res.url" @click="promote(res)" :disabled="res.promoted"
+                        class="shrink-0 text-[11px] px-2 py-1 rounded border border-accent/60 text-accent hover:bg-accent hover:text-white disabled:opacity-50 disabled:cursor-default"
+                        x-text="res.promoted ? '✓ on graph' : '+ node'"></button>
+                <span x-show="!res.url" class="shrink-0 text-[10px] text-ink-faint">summary</span>
+              </div>
+              <!-- Expanded: explore the full info before deciding to add. -->
+              <div x-show="res._open" x-cloak class="mt-1.5 pt-1.5 border-t border-bg-border space-y-1">
+                <div class="text-ink-muted markdown" x-html="renderMd(res.summary)"></div>
+                <a x-show="res.url" :href="res.url" target="_blank" class="text-accent break-all block" x-text="res.url"></a>
+                <pre x-show="res.raw_json" class="text-[10px] text-ink-faint bg-bg-card border border-bg-border rounded p-1.5 overflow-x-auto max-h-40 whitespace-pre" x-text="prettyJson(res.raw_json)"></pre>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Clusters this node belongs to: show here, or open the cluster on a new graph. -->
+      <div x-show="detail && detail.clusters && detail.clusters.length" x-cloak class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Clusters</div>
+        <div class="space-y-1.5">
+          <template x-for="c in (detail?.clusters || [])" :key="c.id">
+            <div class="flex items-center justify-between gap-2 text-sm">
+              <span class="truncate" x-text="c.name"></span>
+              <span class="shrink-0 flex gap-1">
+                <button @click="showCluster(c.id)" class="text-[10px] px-1.5 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">show</button>
+                <button @click="openClusterNewGraph(c.id)" title="open cluster in a new graph" class="text-[10px] px-1.5 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">↗ new</button>
+              </span>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Run the full investigator agent on this one node (the autonomous OSINT dig). -->
+      <div class="p-4 border-t border-bg-border">
+        <button @click="investigateThisNode()" :disabled="invBusy"
+                class="w-full text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+          <span x-show="!invBusy">🔍 Investigate this node</span>
+          <span x-show="invBusy" x-cloak>Starting…</span>
+        </button>
+        <div class="text-[11px] text-ink-faint mt-1.5">Sends the investigator out to dig on
+          <span class="font-mono" x-text="selected?.full_name"></span> (whois, DNS, search, infra) and build the graph.</div>
+        <div x-show="invMsg" x-cloak class="text-xs text-ink-muted mt-1" x-text="invMsg"></div>
+      </div>
+
+      <!-- Incoming / outgoing: isolate the node's directed neighbors on the canvas. -->
+      <div class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Focus this node</div>
+        <div class="flex flex-wrap gap-1.5">
+          <button @click="showDirection('in')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">← incoming (<span x-text="inCount"></span>)</button>
+          <button @click="showDirection('out')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">outgoing (<span x-text="outCount"></span>) →</button>
+          <button @click="showDirection('all')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">both</button>
+          <button @click="openNodeNewGraph(selected.id)" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">↗ new graph</button>
+        </div>
+      </div>
+
+      <!-- PRD-08: select this node + its directed connections, then act on the whole
+           set at once (e.g. run the full agent on all of them — PRD-07). -->
+      <div class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Connections (incoming / outgoing)</div>
+        <div class="flex flex-wrap gap-1.5">
+          <button @click="selectConnections('in')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ incoming</button>
+          <button @click="selectConnections('out')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ outgoing</button>
+          <button @click="selectConnections('all')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ all</button>
+        </div>
+        <div x-show="selectedSet.length" x-cloak class="mt-2.5">
+          <div class="text-xs text-ink-muted mb-1.5"><span class="font-mono" x-text="selectedSet.length"></span> node(s) selected for investigation</div>
+          <div class="flex flex-wrap gap-1.5">
+            <button @click="investigateSelected()" :disabled="invBusy"
+                    class="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-50">
+              <span x-show="!invBusy">Investigate selected (<span x-text="selectedSet.length"></span>)</span>
+              <span x-show="invBusy" x-cloak>Starting…</span>
+            </button>
+            <button @click="clearSelection()" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:bg-bg-soft">Clear</button>
+          </div>
+          <div x-show="invMsg" x-cloak class="text-xs text-ink-muted mt-1.5" x-text="invMsg"></div>
+        </div>
+      </div>
+
+      <!-- Where it came from + what it means (the source report + screenshot context). -->
+      <div x-show="detail && detail.sources && detail.sources.length" x-cloak class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Where it came from — what it means</div>
+        <div class="space-y-2">
+          <template x-for="(s, i) in (detail?.sources || [])" :key="i">
+            <div class="text-xs">
+              <div class="text-ink-faint mb-0.5"><span class="font-mono" x-text="s.report"></span> · <span x-text="s.kind"></span></div>
+              <div x-show="s.context" class="text-ink-muted bg-bg-soft border border-bg-border rounded p-2 whitespace-pre-wrap" x-text="s.context"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Connected + HOW: typed relationships with direction + rel_type + evidence. -->
+      <div class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Connected — and how (<span x-text="(detail?.connections || []).length"></span>)</div>
+        <div x-show="!(detail?.connections || []).length" x-cloak class="text-xs text-ink-faint">No typed connections yet. Investigate this target to build them.</div>
+        <div class="space-y-1.5">
+          <template x-for="(c, i) in (detail?.connections || [])" :key="i">
+            <div class="text-xs bg-bg-soft border border-bg-border rounded p-2">
+              <div class="flex items-center gap-1.5">
+                <span class="font-mono text-[10px] px-1 py-0.5 rounded"
+                      :class="c.dir === 'out' ? 'bg-accent/15 text-accent' : 'bg-bg-card text-ink-muted border border-bg-border'"
+                      :title="c.rel_gloss || c.rel_type"
+                      x-text="(c.dir === 'out' ? '→ ' : '← ') + c.rel_type"></span>
+                <a :href="'/entity/' + c.other_id" class="font-mono truncate text-ink hover:text-accent" x-text="c.other"></a>
+                <!-- PRD-05: reject a wrong edge in place — drops the claim, retires the
+                     graph edge (cascade), keeps it for audit. Only claim-backed edges. -->
+                <button x-show="c.claim_id" @click="rejectConnection(c)"
+                        class="ml-auto shrink-0 text-[10px] text-ink-faint hover:text-sev-high"
+                        title="This is wrong — drop it from the graph">✕ wrong</button>
+              </div>
+              <div x-show="c.evidence" class="text-ink-muted mt-1" x-text="c.evidence"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Appears with: co-occurrence ("same pic") neighbors — the faint dotted edges. -->
+      <div x-show="detail && detail.co_occurs && detail.co_occurs.length" x-cloak class="p-4 border-t border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Appears with — same report (<span x-text="(detail?.co_occurs || []).length"></span>)</div>
+        <div class="space-y-1">
+          <template x-for="(c, i) in (detail?.co_occurs || [])" :key="i">
+            <a :href="'/entity/' + c.other_id" class="flex items-center justify-between text-xs py-0.5 hover:bg-bg-soft rounded px-1.5">
+              <span class="font-mono truncate text-ink-muted" x-text="c.other"></span>
+              <span class="shrink-0 text-ink-faint" x-text="c.shared + '×'"></span>
+            </a>
+          </template>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Edge detail — same DOCKED right column, pops in/out. -->
+    <aside x-show="selectedEdge && panelOpen" x-cloak
+           class="w-96 shrink-0 bg-bg-card border-l border-bg-border overflow-y-auto relative"
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0">
+      <div class="p-4 border-b border-bg-border">
+        <div class="flex items-start justify-between mb-2">
+          <div class="min-w-0">
+            <div class="text-[11px] uppercase tracking-wider text-ink-faint">Connection</div>
+            <div class="text-sm font-mono text-ink mt-1 break-words">
+              <span x-text="edgeDetail?.src_name || selectedEdge?.source"></span>
+              <span class="text-accent mx-1" x-text="selectedEdge?.co_occurrence ? '·' : '→'"></span>
+              <span x-text="edgeDetail?.dst_name || selectedEdge?.target"></span>
+            </div>
+          </div>
+          <button @click="setPanel(false)" title="hide panel" class="text-ink-muted hover:text-ink shrink-0 text-lg leading-none">›</button>
+        </div>
+        <div class="flex flex-wrap gap-1.5 text-[11px]">
+          <span class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border font-mono"
+                x-text="selectedEdge?.co_occurrence ? 'co-occurs' : (selectedEdge?.rel_type || 'related')"></span>
+          <span x-show="selectedEdge?.confidence && !selectedEdge?.co_occurrence" x-cloak
+                class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border" x-text="selectedEdge?.confidence + ' confidence'"></span>
+        </div>
+      </div>
+
+      <!-- What it means -->
+      <div class="p-4 border-b border-bg-border">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">What it means</div>
+        <div class="text-sm text-ink-muted" x-show="selectedEdge?.co_occurrence">
+          These two appeared <strong>in the same report(s)</strong>. It's a co-occurrence link, not a confirmed relationship — they showed up together, which is a lead, not proof.
+        </div>
+        <div class="text-sm text-ink-muted" x-show="!selectedEdge?.co_occurrence">
+          <span class="font-mono text-accent" x-text="selectedEdge?.rel_type"></span>:
+          <span x-text="edgeDetail?.src_name"></span> → <span x-text="edgeDetail?.dst_name"></span>.
+          A typed relationship the investigation established.
+        </div>
+      </div>
+
+      <!-- Why it was created: typed evidence, or the shared-report context. -->
+      <div class="p-4">
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Why this edge exists</div>
+        <template x-if="(edgeDetail?.typed || []).length">
+          <div class="space-y-2">
+            <template x-for="(t, i) in (edgeDetail?.typed || [])" :key="i">
+              <div class="text-xs bg-bg-soft border border-bg-border rounded p-2">
+                <div class="font-mono text-accent mb-1" x-text="(t.dir === 'reverse' ? '← ' : '→ ') + t.rel_type + ' (' + t.confidence + ')'"></div>
+                <div class="text-ink-muted" x-text="t.evidence || 'no recorded evidence'"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="(edgeDetail?.shared_reports || []).length">
+          <div class="space-y-2 mt-2">
+            <div class="text-[11px] text-ink-faint" x-show="!(edgeDetail?.typed || []).length">Shared report context — where both appear:</div>
+            <template x-for="(s, i) in (edgeDetail?.shared_reports || [])" :key="i">
+              <div class="text-xs">
+                <div class="text-ink-faint mb-0.5"><span class="font-mono" x-text="s.report"></span> · <span x-text="s.kind"></span></div>
+                <div class="text-ink-muted bg-bg-soft border border-bg-border rounded p-2 whitespace-pre-wrap" x-text="s.context"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+        <div x-show="edgeDetail && !(edgeDetail.typed || []).length && !(edgeDetail.shared_reports || []).length"
+             x-cloak class="text-xs text-ink-faint">No recorded reason for this edge.</div>
+        <!-- 4pp-15: analyst expands the EDGE on demand — investigate the relationship. -->
+        <div class="mt-3 pt-3 border-t border-bg-border">
+          <button @click="investigateEdge()" :disabled="edgeBusy"
+                  class="w-full text-sm px-3 py-2 rounded bg-accent/10 border border-accent/40 text-accent hover:bg-accent/20 disabled:opacity-50">
+            <span x-show="!edgeBusy">🔎 Investigate this connection</span>
+            <span x-show="edgeBusy" x-cloak>Investigating…</span>
+          </button>
+          <div x-show="edgeMsg" x-cloak class="mt-2 text-xs text-ink-muted" x-text="edgeMsg"></div>
+        </div>
+      </div>
+    </aside>
+   </div><!-- /graph canvas (top ~60%) -->
+
+   <!-- Docked unified chat (bottom ~40%). SAME caseChat() as the corner bubble —
+        one chat, two layouts ([[one-unified-chat]]). The bubble is suppressed on this
+        page via the empty chat-block override at the end of this template. -->
+   <div class="flex-[1] min-h-0 border-t border-bg-border bg-bg-card">
+     {% set docked = true %}{% include "_chat.html" %}
+   </div>
+  </div><!-- /right column -->
+</div>
+
+<script>
+const ACTIVE_CASE = {{ (nav.active_case or '')|tojson }};
+function graphController() {
+  return {
+    cy: null,
+    minScore: 30,
+    panelOpen: true,        // detail panel docked-open vs popped-out (the right-side panel)
+    role: '',
+    clusterId: null,
+    inClusterOnly: false,   // show the tail (all the dots), not just clustered nodes
+    showAll: false,
+    coOccurrence: true,     // draw the "same pic" co-occurrence links among visible nodes
+    meaningfulOnly: true,   // hide unconnected/unclassified junk (raw numbers, fragments)
+    originFilter: '',       // '' | 'intake' | 'osint'
+    detail: null,           // rich node detail (what / where-from / connected-how / clusters)
+    inCount: 0, outCount: 0,
+    focus: null,            // when set, /api/graph returns only this node's neighborhood
+    lastHidden: null,
+    selectionTrail: [],  // node names the analyst clicked since the last chat message
+    selectedEdge: null, edgeDetail: null, edgeBusy: false, edgeMsg: '',
+    clusters: [],
+    nodeCount: 0,
+    runActive: false,   // a warm chat run is streaming — suppress the "Nothing to plot" card
+    _spreadBusy: false,   // a force-spread layout is animating
+    layoutName: 'cose',  // analyst-picked layout; cose stays the default (issue graph-layouts)
+    dagreOk: false,      // dagre CDN scripts loaded + registered (feature-checked)
+    pathMode: false,     // shortest-path mode: next two node taps pick source + target
+    pathSource: null,    // the first picked node id while pathMode is armed
+    pathMsg: '',         // status line under the toggle ("pick the target…" / "no path")
+    styleRules: [],      // persisted per-case conditional formatting (issue graph-style-rules)
+    collectionsOk: false, // cytoscape-expand-collapse loaded + registered (feature-checked)
+    groupCollections: true,  // collapse >=15 same-type leaf children into one compound node
+    _ec: null,            // the expand-collapse extension api instance
+    rulesOpen: false,    // the rule editor panel
+    ruleEdit: null,      // index of the rule being edited inline (-1 = new)
+    ruleDraft: { label: '', selector: '', styleText: '', enabled: true },
+    ruleMsg: '',
+    edgeCount: 0,
+    loaded: false,
+    selected: null,
+    neighbors: [],
+    selectedSet: [],          // PRD-08: node + its connections, acted on at once
+    invBusy: false, invMsg: '', invTimer: null,
+    providers: [],
+    enrichProvider: '',
+    enrichBusy: false,
+    enrichResults: [],
+    enrichError: '',
+    etype: '',
+    entityTypes: [],
+    // Facet counts are derived from the nodes ACTUALLY on the canvas (computeFacets),
+    // so the dropdown counts always match what's drawn — not a different population.
+    facetCounts: { roles: {}, types: {}, origins: {}, clusters: {} },
+    roleFacet: [], originFacet: [],
+    clusterNames: {},   // id -> name (for the cluster dropdown labels)
+    baseNodes: [], baseEdges: [],
+    nodeSearch: '', nodeSearchMsg: '',   // search box: jump to a node by name
+    pastRuns: [],
+    activeRunId: null,
+    showAdd: false,
+    addError: '',
+    newNode: { name: '', type: 'indicator', thumbnail: '', link: false },
+    nodeTypes: ['person', 'username', 'handle', 'telegram_channel', 'domain', 'ip',
+                'url', 'email', 'organization', 'hash_sha256', 'crypto_wallet', 'indicator'],
+
+    async init() {
+      const urlParams = new URLSearchParams(window.location.search);
+      // Provider list for graph-native enrichment (configured ones lead).
+      fetch('/api/enrich/providers').then(r => r.json()).then(d => {
+        this.providers = (d.providers || []).sort((a, b) => (b.configured) - (a.configured));
+        const firstReady = this.providers.find(p => p.configured);
+        this.enrichProvider = firstReady ? firstReady.slug : (this.providers[0]?.slug || '');
+      });
+      // Type/role/origin/cluster filter options + counts are derived per-reload from
+      // the rendered nodes (computeFacets), so they always match the canvas.
+      if (urlParams.get('cluster_id')) {
+        this.clusterId = parseInt(urlParams.get('cluster_id'));
+        this.minScore = 0;
+      }
+      // Deep-link from an entity page: /graph?focus=<id> centers on that actor.
+      this.focusId = urlParams.get('focus');
+      this.focus = this.focusId;   // persists for the api filter; focusId is one-time centering
+      if (this.focusId) { this.minScore = 0; this.inClusterOnly = false; this.meaningfulOnly = false; }
+      // Deep-link to a specific cluster shows the WHOLE cluster (don't hide members).
+      if (urlParams.get('cluster_id')) this.meaningfulOnly = false;
+
+      // Cluster NAMES only (id -> name); the counts come from rendered nodes.
+      const clu = await fetch('/api/clusters').then(r => r.json());
+      (clu.clusters || []).forEach(c => { this.clusterNames[c.id] = c.name; });
+
+      this.cy = cytoscape({
+        container: document.getElementById('cy'),
+        style: this.style(),
+        wheelSensitivity: 0.2,
+        minZoom: 0.1,
+        maxZoom: 4,
+      });
+
+      // Feature check: dagre is offered only when both CDN scripts actually loaded
+      // and registered. A failed load hides the option; cose rendering is untouched.
+      try {
+        this.dagreOk = (typeof window.dagre !== 'undefined') && !!this.cy.layout({ name: 'dagre' });
+      } catch (e) { this.dagreOk = false; }
+
+      // Persisted conditional formatting for this case (issue graph-style-rules).
+      this.loadStyleRules();
+
+      // Feature check: collection grouping needs cytoscape-expand-collapse. A
+      // failed CDN load just disables grouping — the graph renders untouched.
+      try {
+        this.collectionsOk = typeof this.cy.expandCollapse === 'function';
+        if (this.collectionsOk) {
+          this._ec = this.cy.expandCollapse({
+            layoutBy: null, animate: false, undoable: false, fisheye: false,
+            // Edge handling (PRD finding-10): edges into hidden children re-attach
+            // to the collapsed parent as aggregated meta-edges, so connectivity
+            // stays visible while collapsed; expanding restores the exact edges.
+            edgeTypeInfo: () => 'meta', groupEdgesOfSameTypeOnCollapse: true,
+          });
+        }
+      } catch (e) { this.collectionsOk = false; }
+
+      this.cy.on('tap', 'node', (evt) => this.onNodeTap(evt.target));
+      this.cy.on('tap', 'edge', (evt) => this.onEdgeTap(evt.target));
+      this.cy.on('tap', (evt) => {
+        if (evt.target === this.cy) {
+          this.selected = null;
+          this.neighbors = [];
+          this.detail = null;
+          this.selectedEdge = null;
+          this.edgeDetail = null;
+          this.cy.elements().removeClass('selected neighbor dimmed facet-match');
+          this.clearPath();   // background click exits path mode too
+          if (this.nodeSearch) this.nodeSearch = '';   // and lifts a search spotlight
+        }
+      });
+
+      // Esc clears the path highlight + disarms path mode (issue graph-pathfinding).
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && (this.pathMode || this.cy.elements('.path-highlight').length)) {
+          this.clearPath();
+        }
+        // Esc also lifts a search spotlight (the dimmed-graph dead-end).
+        if (e.key === 'Escape' && this.cy.elements('.facet-match').length) {
+          this.clearSearch();
+        }
+      });
+
+      // PRD-11: refresh whenever this case's data changes — an investigator run (here
+      // OR on another page) promoted nodes, Process retyped, a reject dropped an edge.
+      // The shared subscriber (in _layout.html) drives it; replaces the old
+      // visibilitychange tab-focus reload hack.
+      if (window.kipiOnCaseChange) {
+        window.kipiOnCaseChange(() => this.onCaseChanged());
+      }
+
+      // Register this canvas with the global chat (_chat.html). The one chat drives the
+      // graph through these hooks when the graph page is open; elsewhere they're absent
+      // and the chat falls back to a compact run line. Cleared on unload.
+      const self = this;
+      window.__kipiGraph = {
+        applyDeltas: (d) => self.applyDeltas(d),
+        setRunning: (b) => { self.runActive = !!b; },
+        reload: () => self.reload(),
+        highlightByName: (name) => self.highlightByName(name),
+        // Node-card "focus" actions (incr 2): reuse the graphController methods so the
+        // chat card can isolate a node's neighbors / open it on a fresh graph.
+        focusDirection: (id, dir) => { if (self.selected && String(self.selected.id) === String(id)) self.showDirection(dir); },
+        openNodeNewGraph: (id) => self.openNodeNewGraph(id),
+        // Chat-driven filtering/search (incr 3) — the sidebar stays as a mirror; these let
+        // the chat set the same filter state + reload the canvas.
+        applyFilter: (patch) => { Object.assign(self, patch); self.reload(); },
+        searchGraph: (q) => { self.nodeSearch = q; self.searchNode(); },
+        showAll: () => self.showEverything(),
+        selectedName: () => (self.selected && self.selected.full_name) || null,
+        takeSelections: () => { const s = self.selectionTrail.slice(); self.selectionTrail = []; return s; },
+        startInvestigation: (action) => {
+          // Reuse the rich run panel for chat-launched runs on the graph page.
+          if (self.invBusy) { self.invMsg = 'a run is already in progress.'; return; }
+          self.invBusy = true; self.invMsg = 'starting…';
+          const body = action.scope === 'case' ? { deep: !!action.deep }
+                                               : { entity: action.entity, deep: !!action.deep };
+          fetch('/api/investigate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body) }).then(r => r.json()).then(d => {
+            if (d.error) { self.invMsg = d.error; self.invBusy = false; return; }
+            self.watchRunThenRefresh();
+          }).catch(() => { self.invMsg = 'Could not start.'; self.invBusy = false; });
+        },
+      };
+      window.addEventListener('beforeunload', () => { window.__kipiGraph = null; });
+
+      await this.reload();
+
+      // Chat created a case + fired a run, then reloaded us into it — pick up the live
+      // run so the panel streams without a manual click (create+run from chat).
+      if (urlParams.get('watch') === '1') {
+        this.invBusy = true; this.invMsg = 'starting…';
+        this.watchRunThenRefresh();
+      }
+    },
+
+    style() {
+      return [
+        { selector: 'node', style: {
+          'background-color': 'data(clusterColor)',
+          // Just the name on the graph — the TYPE lives in the side panel (it was wrong/
+          // noisy on the canvas: roles like 'ioc' and mis-typed phones read as garbage).
+          'label': 'data(label)',
+          'color': '#1A1A19',
+          'font-size': 'mapData(score, 0, 100, 8, 13)',
+          'font-family': 'Inter, sans-serif',
+          'font-weight': 500,
+          'text-margin-y': -8,
+          'text-outline-color': '#FAFAF9',
+          'text-outline-width': 2.5,
+          'width': 'mapData(score, 0, 100, 16, 55)',
+          'height': 'mapData(score, 0, 100, 16, 55)',
+          'border-width': 3,
+          'border-color': 'data(color)',
+          'border-style': 'data(borderStyle)',
+          'shape': 'data(shape)',
+        }},
+        { selector: 'node[?is_bridge]', style: {
+          'border-width': 5,
+          'border-style': 'double',
+          'border-color': '#1A1A19',
+        }},
+        { selector: 'node[thumbnail]', style: {
+          'background-image': 'data(thumbnail)',
+          'background-fit': 'cover',
+          'background-image-crossorigin': 'anonymous',
+          'border-width': 3,
+        }},
+        // Collection nodes (issue graph-collection-nodes): the compound shell +
+        // its collapsed form read as a labeled "box of N", not an entity dot.
+        { selector: 'node[?isCollection]', style: {
+          'background-color': '#E7E5E0',
+          'background-opacity': 0.6,
+          'border-width': 1.5,
+          'border-style': 'dashed',
+          'border-color': '#A8A29E',
+          'label': 'data(label)',
+          'font-size': 10,
+          'color': '#57534E',
+          'text-valign': 'top',
+          'shape': 'round-rectangle',
+        }},
+        { selector: 'node.cy-expand-collapse-collapsed-node', style: {
+          'background-color': '#D6D3CC',
+          'border-width': 2,
+          'border-style': 'double',
+          'border-color': '#78716C',
+          'width': 46, 'height': 46,
+          'shape': 'round-rectangle',
+          'font-weight': 600,
+        }},
+        { selector: 'node.selected', style: {
+          'border-width': 4, 'border-color': '#0F766E',
+        }},
+        { selector: 'node.neighbor', style: {
+          // Glow halo, NOT a dashed border — the dashed border now means OSINT origin,
+          // so highlighting a neighbor must not impersonate it.
+          'underlay-color': '#0F766E', 'underlay-opacity': 0.28, 'underlay-padding': 6,
+        }},
+        { selector: 'node.provisional', style: {
+          // Live "discovered" node, not yet landed. Light teal so it reads as fresh/
+          // tentative (not background) — deliberately NOT dashed/dotted (those mean
+          // osint/manual origin). Goes solid via reload() if it actually lands.
+          'opacity': 0.9,
+          'background-color': '#5EEAD4',
+          'border-width': 2,
+          'border-color': '#0F766E',
+          'border-style': 'solid',
+          'color': '#0F766E',
+          'font-style': 'italic',
+        }},
+        { selector: 'node.dimmed', style: { 'opacity': 0.15 }},
+        { selector: 'node.facet-match', style: {
+          // Facet highlight: an amber halo + bold label so matches pop against the dimmed rest.
+          'underlay-color': '#B45309', 'underlay-opacity': 0.30, 'underlay-padding': 7,
+          'font-weight': 'bold', 'z-index': 900,
+        }},
+        { selector: 'edge', style: {
+          'curve-style': 'bezier',
+          'line-color': 'data(color)',
+          'target-arrow-color': 'data(color)',
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 0.8,
+          'width': 'data(width)',
+          'label': 'data(rel_type)',
+          'font-size': 9,
+          'font-family': 'Inter, sans-serif',
+          'color': '#57534E',
+          'text-rotation': 'autorotate',
+          'text-background-color': '#FAFAF9',
+          'text-background-opacity': 0.88,
+          'text-background-padding': 2,
+        }},
+        { selector: 'edge[?bridge_edge]', style: {
+          'line-color': '#C2410C',
+          'target-arrow-color': '#C2410C',
+          'width': 2.5,
+          'opacity': 0.95,
+        }},
+        { selector: 'edge[?cross_cluster]', style: {
+          'line-color': '#B91C1C',
+          'target-arrow-color': '#B91C1C',
+          'line-style': 'dashed',
+          'width': 3,
+          'opacity': 1,
+        }},
+        { selector: 'edge[?co_occurrence]', style: {
+          'line-color': '#A8A29E',
+          'line-style': 'dotted',
+          'target-arrow-shape': 'none',
+          'width': 1,
+          'opacity': 0.4,
+          'label': '',
+          'curve-style': 'haystack',
+        }},
+        { selector: 'edge.selected', style: {
+          'line-color': '#0F766E', 'target-arrow-color': '#0F766E',
+          'width': 3.5, 'opacity': 1, 'z-index': 999,
+        }},
+        { selector: 'edge.dimmed', style: { 'opacity': 0.1 }},
+        // Provisional LAST so it wins over the base `edge` rules above (cytoscape applies
+        // matching selectors in array order, later overrides earlier). A clean thin teal
+        // link from the looked-up entity to what it surfaced — not the fat gray default.
+        { selector: 'edge.provisional', style: {
+          'line-color': '#2DD4BF',
+          'line-style': 'dashed',
+          'width': 2,
+          'opacity': 0.8,
+          'curve-style': 'bezier',
+          'target-arrow-shape': 'triangle',
+          'target-arrow-color': '#2DD4BF',
+          'arrow-scale': 0.6,
+          'label': '',
+        }},
+        // Shortest-path mode (issue graph-pathfinding): LAST so the found path
+        // wins on every shared element, including provisional edges (cytoscape
+        // applies later matching selectors over earlier ones).
+        { selector: '.path-dim', style: { 'opacity': 0.12 }},
+        { selector: 'node.path-highlight', style: {
+          'border-width': 3, 'border-color': '#0F766E', 'opacity': 1, 'z-index': 998,
+        }},
+        { selector: 'edge.path-highlight', style: {
+          'line-color': '#0F766E', 'target-arrow-color': '#0F766E',
+          'width': 4, 'opacity': 1, 'z-index': 998, 'line-style': 'solid',
+        }},
+        { selector: 'node.path-endpoint', style: {
+          'border-width': 4, 'border-color': '#B45309', 'opacity': 1, 'z-index': 999,
+        }},
+      ];
+    },
+
+    clusterColor(ids) {
+      // Deterministic color from primary cluster id (golden-ratio hue spread).
+      // Nodes not in any cluster fall back to neutral slate so they're visible but muted.
+      if (!ids || ids.length === 0) return '#475569';
+      const id = ids[0];
+      const h = (id * 137.5) % 360;
+      return `hsl(${h} 65% 50%)`;
+    },
+
+    roleColor(role) {
+      return { operator: '#C2410C', channel: '#7E22CE', ioc: '#B91C1C',
+               infra: '#15803D', source: '#475569' }[role] || '#0F766E';
+    },
+
+    confColor(c) {
+      return { high: '#15803D', medium: '#B45309', low: '#8A847D' }[c] || '#57534E';
+    },
+
+    async reload() {
+      // Fetch with the VISIBILITY filters only (score / meaningful / in-cluster /
+      // co-occurrence / show-all / focus). The facet filters (role / type / origin /
+      // cluster) are applied CLIENT-SIDE below, and the dropdown counts are derived
+      // from this same set — so counts always describe exactly what's on the canvas.
+      const params = new URLSearchParams({ min_score: this.minScore });
+      params.set('in_cluster_only', this.inClusterOnly);
+      params.set('co_occurrence', this.coOccurrence);
+      params.set('meaningful_only', this.meaningfulOnly);
+      if (this.focus) params.set('focus', this.focus);
+      if (this.showAll) params.set('show_all', 'true');
+      const data = await fetch('/api/graph?' + params).then(r => r.json());
+      this.computeFacets(data.nodes);
+
+      const shapeMap = { operator: 'ellipse', channel: 'diamond', ioc: 'octagon', infra: 'rectangle', source: 'triangle' };
+      for (const n of data.nodes) {
+        n.data.color = this.roleColor(n.data.role);
+        n.data.clusterColor = this.clusterColor(n.data.cluster_ids);
+        n.data.shape = shapeMap[n.data.role] || 'ellipse';
+        // Origin → border style: intake = solid, OSINT-discovered = dashed, manual = dotted.
+        n.data.borderStyle = n.data.origin === 'osint' ? 'dashed'
+                           : n.data.origin === 'manual' ? 'dotted' : 'solid';
+        // Keep the full value in full_name (click-through shows it); shorten the canvas
+        // label so long URLs don't sprawl across the graph.
+        if (!n.data.full_name) n.data.full_name = n.data.label || '';
+        n.data.label = this.shortLabel(n.data.full_name);
+        if (!n.data.thumbnail) delete n.data.thumbnail;  // only set when real → node[thumbnail] matches
+      }
+      for (const e of data.edges) {
+        e.data.color = e.data.co_occurrence ? '#A8A29E' : this.confColor(e.data.confidence);
+        e.data.width = e.data.co_occurrence ? 1
+                     : e.data.confidence === 'high' ? 2.5
+                     : e.data.confidence === 'medium' ? 1.5 : 1;
+      }
+
+      this._spreadBusy = false;   // a full rebuild supersedes any in-flight spread
+
+      // Render the FULL visible set. Role/type/origin/cluster don't filter the graph —
+      // they HIGHLIGHT (highlightFacets dims the rest), so the whole network stays in view.
+      // A rebuild invalidates any picked path source / highlighted path (the
+      // element ids may be gone) — disarm path mode instead of leaving a stale
+      // "N hops" message or a dangling source id (issue graph-pathfinding).
+      this.clearPath();
+      this.cy.elements().remove();
+      this.cy.add(data.nodes);
+      this.cy.add(data.edges);
+      // Fold high-fanout neighborhoods into collapsed collection nodes BEFORE
+      // layout so 200 crt.sh subdomains don't flood the canvas.
+      this._buildCollections();
+
+      this.nodeCount = data.nodes.length;
+      this.edgeCount = data.edges.length;
+      this.loaded = true;
+
+      if (this.nodeCount > 0) {
+        // Rebuild honors the analyst's layout pick; cose keeps its stretched-out
+        // tuning (founder: spread it) so dense networks stay legible.
+        const opts = this.layoutName === 'cose'
+          ? Object.assign(this._layoutOpts(),
+                          { idealEdgeLength: 150, nodeRepulsion: 16000, gravity: 0.25 })
+          : this._layoutOpts();
+        opts.stop = () => { this.cy.fit(undefined, 50); if (this.focusId) this.centerOnFocus(); this.highlightFacets(); };
+        this.cy.layout(opts).run();
+      } else {
+        this.highlightFacets();
+      }
+    },
+
+    // Facet counts + options derived from the nodes ACTUALLY rendered (the base
+    // visible set), so every dropdown count matches the canvas. Options reflect the
+    // full visible population (not narrowed by the active facet) so you can always switch.
+    computeFacets(nodes) {
+      const roles = {}, types = {}, origins = {}, clusters = {};
+      for (const n of nodes) {
+        const d = n.data;
+        const r = d.role || '?'; roles[r] = (roles[r] || 0) + 1;
+        const t = d.type || d.surface_type; if (t) types[t] = (types[t] || 0) + 1;
+        if (d.origin) origins[d.origin] = (origins[d.origin] || 0) + 1;
+        (d.cluster_ids || []).forEach(c => { clusters[c] = (clusters[c] || 0) + 1; });
+      }
+      this.facetCounts = { roles, types, origins, clusters };
+      this.entityTypes = Object.entries(types).map(([etype, n]) => ({ etype, n })).sort((a, b) => b.n - a.n);
+      this.roleFacet = Object.entries(roles).filter(([k]) => k !== '?').map(([key, n]) => ({ key, n })).sort((a, b) => b.n - a.n);
+      const oLabel = { intake: 'from intake (uploads)', osint: 'investigated / added by the detective', manual: 'added manually' };
+      this.originFacet = Object.entries(origins).map(([key, n]) => ({ key, n, label: (oLabel[key] || key) })).sort((a, b) => b.n - a.n);
+      this.clusters = Object.entries(clusters).map(([id, n]) => ({ id: +id, n, name: (this.clusterNames[id] || ('cluster ' + id)) })).sort((a, b) => b.n - a.n);
+    },
+    // Does this node match the active role/type/origin/cluster selection?
+    matchFacets(d) {
+      if (this.role && d.role !== this.role) return false;
+      if (this.etype && d.type !== this.etype && d.surface_type !== this.etype) return false;
+      if (this.originFilter && d.origin !== this.originFilter) return false;
+      if (this.clusterId && !(d.cluster_ids || []).includes(this.clusterId)) return false;
+      return true;
+    },
+    // Role/type/origin/cluster HIGHLIGHT (not filter): keep the whole graph on screen,
+    // dim everything, light up the matches + their edges, and frame them.
+    highlightFacets() {
+      const active = this.role || this.etype || this.originFilter || this.clusterId;
+      this.cy.elements().removeClass('dimmed facet-match');
+      if (!active) return;   // nothing selected → full graph, no dimming
+      const matches = this.cy.nodes().filter(n => this.matchFacets(n.data()));
+      this.cy.elements().addClass('dimmed');
+      matches.removeClass('dimmed').addClass('facet-match');
+      matches.connectedEdges().removeClass('dimmed');
+      if (matches.length) this.cy.animate({ fit: { eles: matches, padding: 80 } }, { duration: 400 });
+    },
+    // Search: find node(s) by name and HIGHLIGHT them — dim the rest, halo the matches,
+    // frame them. Exact name match wins; otherwise substring. e.g. "trump-2027.io".
+    // Undo the search spotlight — bring every node back to full opacity. Wired
+    // to: emptying the search box, the Esc key, the Clear button, and a
+    // background click. Without this, a search left the whole graph dimmed with
+    // no way back (the "nodes went opaque and stayed that way" dead-end).
+    clearSearch() {
+      this.nodeSearch = '';
+      this.nodeSearchMsg = '';
+      this.cy.elements().removeClass('dimmed facet-match');
+    },
+
+    searchNode() {
+      const q = (this.nodeSearch || '').trim().toLowerCase();
+      if (!q) { this.clearSearch(); return; }
+      const all = this.cy.nodes();
+      const exact = all.filter(n => (n.data('full_name') || '').toLowerCase() === q);
+      const hits = exact.length ? exact
+                 : all.filter(n => (n.data('full_name') || '').toLowerCase().includes(q));
+      this.cy.elements().removeClass('dimmed facet-match selected neighbor');
+      if (!hits.length) {
+        this.nodeSearchMsg = 'no node named "' + this.nodeSearch.trim() + '" on the graph (try "show all")';
+        return;
+      }
+      // Spotlight: dim everything, light up the matches + their edges, frame them.
+      this.cy.elements().addClass('dimmed');
+      hits.removeClass('dimmed').addClass('facet-match');
+      hits.connectedEdges().removeClass('dimmed');
+      this.cy.animate({ fit: { eles: hits, padding: 90 } }, { duration: 400 });
+      if (hits.length === 1) {
+        this.onNodeTap(hits[0]);            // single hit → open its panel too
+        hits.addClass('facet-match');       // re-apply (onNodeTap clears dim classes)
+        this.nodeSearchMsg = '';
+      } else {
+        this.nodeSearchMsg = hits.length + ' matches highlighted';
+      }
+    },
+
+    // Spotlight a node BY NAME on the canvas (used when a node name is clicked in the
+    // docked chat). Same spotlight as searchNode: dim the rest, light the match + its
+    // edges, frame it, open its panel on a single hit. Returns false if no such node.
+    highlightByName(name) {
+      const q = (name || '').trim().toLowerCase();
+      if (!q || !this.cy) return false;
+      const all = this.cy.nodes();
+      const exact = all.filter(n => (n.data('full_name') || '').toLowerCase() === q);
+      const hits = exact.length ? exact
+                 : all.filter(n => (n.data('full_name') || '').toLowerCase().includes(q));
+      this.cy.elements().removeClass('dimmed facet-match selected neighbor');
+      if (!hits.length) return false;
+      this.cy.elements().addClass('dimmed');
+      hits.removeClass('dimmed').addClass('facet-match');
+      hits.connectedEdges().removeClass('dimmed');
+      this.cy.animate({ fit: { eles: hits, padding: 90 } }, { duration: 400 });
+      if (hits.length === 1) { this.onNodeTap(hits[0]); hits.addClass('facet-match'); }
+      return true;
+    },
+
+    // Safe markdown → HTML (escape first) so agent text renders bold/lists, not raw '**'.
+    renderMd(md) {
+      if (!md) return '';
+      let h = String(md).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+      h = h.replace(/(?:^#{1,6}\s*)(.+)$/gm, '<strong>$1</strong>');
+      h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
+      h = h.replace(/(?:^[-*] .+(?:\n|$))+/gm, b =>
+        '<ul class="list-disc ml-4">' + b.trim().split('\n').map(l => `<li>${l.replace(/^[-*] /, '')}</li>`).join('') + '</ul>');
+      return h.split(/\n{2,}/).map(p =>
+        /^<(ul|ol|h\d|blockquote|strong)/.test(p.trim()) ? p : (p.trim() ? `<p>${p.replace(/\n/g, '<br>')}</p>` : '')
+      ).join('');
+    },
+
+    centerOnFocus() {
+      const node = this.cy.getElementById(String(this.focusId));
+      if (node && node.length) {
+        this.cy.animate({ center: { eles: node }, zoom: 1.2 }, { duration: 400 });
+        this.onNodeTap(node);
+      }
+      this.focusId = null;  // only auto-center on first load
+    },
+
+    showEverything() {
+      this.minScore = 0;
+      this.role = '';
+      this.etype = '';
+      this.clusterId = null;
+      this.inClusterOnly = false;
+      this.originFilter = '';
+      this.coOccurrence = true;
+      this.meaningfulOnly = false;
+      this.focus = null;
+      this.reload();
+    },
+
+    // ONE source of layout options for every call site (issue graph-layouts).
+    // cose stays the default; dagre = hierarchy, concentric = ego rings around
+    // the selected node (falls back to the highest-degree node), circle = circle.
+    _layoutOpts() {
+      const base = { animate: 'end', animationDuration: 600, fit: true, padding: 50 };
+      if (this.layoutName === 'dagre' && this.dagreOk)
+        return { name: 'dagre', rankDir: 'TB', nodeSep: 40, rankSep: 90, ...base };
+      if (this.layoutName === 'concentric') {
+        const ego = this._egoNode();
+        const depths = this._hopDepths(ego);
+        // Loop, not spread — Math.max(...thousands) blows the call stack.
+        let maxD = 1;
+        for (const k in depths) if (depths[k] > maxD) maxD = depths[k];
+        return {
+          name: 'concentric', minNodeSpacing: 28, ...base,
+          // Higher value = closer to the center: the ego sits in the middle,
+          // each hop ring one level out; unreachable nodes land outermost.
+          concentric: (n) => (maxD + 1) - (depths[n.id()] !== undefined ? depths[n.id()] : maxD + 1),
+          levelWidth: () => 1,
+        };
+      }
+      if (this.layoutName === 'circle') return { name: 'circle', ...base };
+      return { name: 'cose', randomize: true, idealEdgeLength: 110, nodeRepulsion: 8000,
+               nodeDimensionsIncludeLabels: true, ...base };
+    },
+
+    _egoNode() {
+      if (this.selected) {
+        const n = this.cy.getElementById(String(this.selected.id));
+        if (n.length) return n;
+      }
+      return this.cy.nodes().max((n) => n.degree(false)).ele;
+    },
+
+    _hopDepths(ego) {
+      const depths = {};
+      if (!ego || !ego.length) return depths;
+      this.cy.elements().bfs({
+        roots: ego, directed: false,
+        visit: (v, e, u, i, depth) => { depths[v.id()] = depth; },
+      });
+      return depths;
+    },
+
+    setLayout(name) {
+      this.layoutName = name;
+      this.reLayout();
+    },
+
+    reLayout() {
+      this.cy.layout(this._layoutOpts()).run();
+    },
+
+    // Pop the docked detail panel in/out. The canvas reclaims the width, so resize cy
+    // after the transition (cytoscape doesn't auto-detect flex resizes).
+    setPanel(open) {
+      this.panelOpen = open;
+      setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
+    },
+
+    // --- Collection nodes for high-fanout neighborhoods (issue graph-collection-nodes) ---
+    // A crt.sh sweep that lands 200 subdomains must not flood the canvas: leaf
+    // children (degree 1) of one hub, same type, >=15 of them, fold into ONE
+    // expandable compound node labeled "N <type>s". Collapsed by default; click
+    // expands. Skipped entirely when the extension didn't load (feature check).
+    COLLECTION_MIN: 15,
+
+    _buildCollections() {
+      if (!this.collectionsOk || !this.groupCollections) return;
+      const made = [];
+      this.cy.nodes('[!isCollection]').forEach(hub => {
+        if (hub.isChild()) return;
+        const byType = {};
+        hub.connectedEdges().connectedNodes().forEach(n => {
+          if (n.id() === hub.id() || n.isChild() || n.degree(false) !== 1) return;
+          (byType[n.data('type') || 'node'] = byType[n.data('type') || 'node'] || []).push(n);
+        });
+        for (const [type, kids] of Object.entries(byType)) {
+          if (kids.length < this.COLLECTION_MIN) continue;
+          const pid = `grp-${hub.id()}-${type}`;
+          if (this.cy.getElementById(pid).length) continue;
+          // The bucket carries its children's shared type/origin so facet
+          // highlighting and node[type=...] style rules match the VISIBLE
+          // collapsed bucket, not just the hidden children.
+          this.cy.add({ group: 'nodes', data: {
+            id: pid, isCollection: true, label: `${kids.length} ${type}s`,
+            full_name: `${kids.length} ${type}s via ${hub.data('label') || hub.id()}`,
+            type, surface_type: type, origin: kids[0].data('origin') || 'intake',
+            role: '', cluster_ids: [],
+          }});
+          kids.forEach(n => n.move({ parent: pid }));
+          made.push(pid);
+        }
+      });
+      if (made.length) {
+        // Collapse the new groups: the extension re-attaches the children's
+        // edges to the collapsed parent as aggregated meta-edges.
+        this._ec.collapse(this.cy.nodes(made.map(id => `#${CSS.escape(id)}`).join(', ')));
+      }
+      return made.length;
+    },
+
+    // --- Conditional formatting: persisted style rules (issue graph-style-rules) ---
+    async loadStyleRules() {
+      try {
+        const res = await fetch('/api/graph/style-rules?case=' + encodeURIComponent(this.caseParam()));
+        const data = await res.json();
+        this.styleRules = data.rules || [];
+        this.applyStyleRules();
+      } catch (e) { this.ruleMsg = 'rules failed to load'; }
+    },
+
+    caseParam() {
+      // The active-case scope rides on the 'case' cookie the server reads
+      // (CASE_COOKIE in app.py); the rules API takes it explicitly. A single
+      // active case → its slug; all/multi-case → the global rule bucket.
+      const m = document.cookie.match(/(?:^|; )case=([^;]*)/);
+      const v = m ? decodeURIComponent(m[1]) : '';
+      return (v && v !== '__all__' && !v.includes(',')) ? v : '';
+    },
+
+    applyStyleRules() {
+      // Rebuild the stylesheet: base rules, then the enabled custom rules, then
+      // the mode styles (selection/provisional/path) so interactions still win.
+      // Each rule applies in isolation — one bad selector is skipped + flagged,
+      // never allowed to blank the canvas (issue graph-style-validation).
+      const base = this.style();
+      // Custom rules slot in AFTER every base type/data style but BEFORE every
+      // interaction style (selection / neighbor / dim / facet / provisional /
+      // path — all class-based selectors), so an analyst rule can restyle the
+      // graph but never override what the UI is actively highlighting.
+      const isInteraction = (s) => /\.[A-Za-z]/.test(s.selector);
+      const head = base.filter(s => !isInteraction(s));
+      const tail = base.filter(isInteraction);
+      let sheet = [...head];
+      this.styleRules.forEach(r => { r.error = false; });
+      for (const r of this.styleRules) {
+        if (!r.enabled) continue;
+        try {
+          // Probe the selector first — cytoscape style errors are async-ish and
+          // can poison the whole sheet, so test compile each rule.
+          this.cy.filter(r.selector);
+          sheet.push({ selector: r.selector, style: r.style });
+        } catch (e) { r.error = true; }
+      }
+      sheet = sheet.concat(tail);
+      try { this.cy.style().fromJson(sheet).update(); }
+      catch (e) {
+        // A style-level rejection (bad property) — retry without custom rules so
+        // the canvas keeps rendering, and flag everything for the editor.
+        this.styleRules.forEach(r => { if (r.enabled) r.error = true; });
+        this.cy.style().fromJson([...head, ...tail]).update();
+      }
+    },
+
+    rulesEdit(i) {
+      this.ruleEdit = i;
+      const r = i === -1 ? { label: '', selector: '', style: {}, enabled: true } : this.styleRules[i];
+      this.ruleDraft = { label: r.label, selector: r.selector,
+                         styleText: JSON.stringify(r.style, null, 0), enabled: r.enabled };
+    },
+
+    async rulesSaveDraft() {
+      let style;
+      try { style = JSON.parse(this.ruleDraft.styleText); }
+      catch (e) { this.ruleMsg = 'style must be valid JSON'; return; }
+      const rule = { label: this.ruleDraft.label || 'rule', selector: this.ruleDraft.selector,
+                     style, enabled: this.ruleDraft.enabled };
+      const rules = [...this.styleRules.map(r => ({ label: r.label, selector: r.selector,
+                                                    style: r.style, enabled: r.enabled }))];
+      if (this.ruleEdit === -1) rules.push(rule); else rules[this.ruleEdit] = rule;
+      await this.rulesPersist(rules);
+    },
+
+    async rulesToggle(i) {
+      const rules = this.styleRules.map((r, j) => ({ label: r.label, selector: r.selector,
+        style: r.style, enabled: j === i ? !r.enabled : r.enabled }));
+      await this.rulesPersist(rules);
+    },
+
+    async rulesDelete(i) {
+      const rules = this.styleRules.filter((_, j) => j !== i)
+        .map(r => ({ label: r.label, selector: r.selector, style: r.style, enabled: r.enabled }));
+      await this.rulesPersist(rules);
+    },
+
+    async rulesRestoreDefaults() {
+      // Explicit reset endpoint — a plain PUT [] is a legitimate "no rules"
+      // state and must NOT resurrect defaults on the next load.
+      try {
+        await fetch('/api/graph/style-rules', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ case: this.caseParam(), reset: true }),
+        });
+        await this.loadStyleRules();
+      } catch (e) { this.ruleMsg = 'reset failed'; }
+    },
+
+    async rulesPersist(rules) {
+      this.ruleMsg = '';
+      try {
+        const res = await fetch('/api/graph/style-rules', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ case: this.caseParam(), rules }),
+        });
+        const data = await res.json();
+        if (!res.ok) { this.ruleMsg = data.error || 'save rejected'; return; }
+        this.ruleEdit = null;
+        await this.loadStyleRules();
+      } catch (e) { this.ruleMsg = 'save failed'; }
+    },
+
+    // --- Shortest-path mode (issue graph-pathfinding) ---------------------
+    togglePathMode() {
+      this.pathMode = !this.pathMode;
+      this.clearPath(false);
+      this.pathMsg = this.pathMode ? 'pick the source node…' : '';
+    },
+
+    clearPath(disarm = true) {
+      this.cy.elements().removeClass('path-highlight path-dim path-endpoint');
+      this.pathSource = null;
+      if (disarm) { this.pathMode = false; this.pathMsg = ''; }
+    },
+
+    _pathTap(node) {
+      if (!this.pathSource) {
+        this.pathSource = node.id();
+        this.cy.elements().removeClass('path-highlight path-dim path-endpoint');
+        node.addClass('path-endpoint');
+        this.pathMsg = `source: ${node.data('label') || node.id()} — pick the target…`;
+        return;
+      }
+      const src = this.cy.getElementById(this.pathSource);
+      if (node.id() === this.pathSource) return;
+      // Dijkstra over the VISIBLE elements, undirected (a link is a link to an
+      // investigator regardless of edge direction), unit weights.
+      const dij = this.cy.elements(':visible').dijkstra({ root: src, directed: false });
+      const path = dij.pathTo(node);
+      this.cy.elements().removeClass('path-highlight path-dim path-endpoint');
+      if (!path || !path.length || dij.distanceTo(node) === Infinity) {
+        this.pathMsg = 'no path between those two nodes';
+        this.pathSource = null;
+        return;
+      }
+      path.addClass('path-highlight');
+      src.union(node).addClass('path-endpoint');
+      this.cy.elements().difference(path).addClass('path-dim');
+      const hops = path.edges().length;
+      this.pathMsg = `${hops} hop${hops === 1 ? '' : 's'} — esc clears`;
+      this.pathSource = null;   // ready for the next pair without re-arming
+    },
+
+    async onNodeTap(node) {
+      // Path mode first — a collapsed bucket is a legitimate path endpoint.
+      if (this.pathMode) { this._pathTap(node); return; }
+      // A collapsed collection node expands on click (its children come back
+      // with their exact edges); the side panel is for real entities.
+      if (this.collectionsOk && this._ec && node.hasClass('cy-expand-collapse-collapsed-node')) {
+        this._ec.expand(node);
+        // The children were folded BEFORE the initial layout ran, so they have
+        // no spread positions — relax them apart instead of leaving a stack.
+        this._spreadAndFit();
+        return;
+      }
+      if (node.data('isCollection')) return;   // expanded group shell — not an entity
+      this.panelOpen = true;   // a tap always opens the panel (even if popped out)
+      setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
+      this.cy.elements().removeClass('selected neighbor dimmed');
+      node.addClass('selected');
+      const nbrs = node.neighborhood('node');
+      nbrs.addClass('neighbor');
+      this.cy.elements().difference(node.union(nbrs).union(node.connectedEdges())).addClass('dimmed');
+      this.selected = node.data();
+      // Remember what the analyst clicked through (client-side, no round-trip): the
+      // next chat message ships this trail so the agent has the viewed-node context.
+      const sname = this.selected.full_name || this.selected.label || this.selected.id;
+      if (sname && this.selectionTrail[this.selectionTrail.length - 1] !== sname) {
+        this.selectionTrail.push(sname);
+        if (this.selectionTrail.length > 8) this.selectionTrail.shift();
+      }
+      this.enrichResults = [];
+      this.enrichError = '';
+      this.pastRuns = [];
+      this.activeRunId = null;
+      this.pickProviderFor(this.selected.type);
+      this.loadHistory(node.id());
+      this.detail = null; this.inCount = 0; this.outCount = 0;
+      this.loadDetail(node.id());   // node details render in the side panel (x-show=selected)
+    },
+
+    async onEdgeTap(edge) {
+      // While picking a path, edge taps are inert — a mixed path/edge-selection
+      // state would clobber the path classes (issue graph-pathfinding).
+      if (this.pathMode) return;
+      // Edge side panel: what the edge means + why it was created.
+      this.panelOpen = true;
+      setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
+      this.selected = null; this.detail = null;
+      this.cy.elements().removeClass('selected neighbor dimmed');
+      edge.addClass('selected');
+      edge.connectedNodes().addClass('neighbor');
+      this.selectedEdge = edge.data();
+      this.edgeDetail = null;
+      try {
+        const d = await fetch('/api/edge?src=' + edge.data('source') + '&dst=' + edge.data('target'))
+          .then(r => r.json());
+        this.edgeDetail = d;
+      } catch (e) {}
+    },
+
+    // 4pp-15: investigate the selected EDGE (the relationship) on demand.
+    async investigateEdge() {
+      if (!this.selectedEdge || this.edgeBusy) return;
+      const src = this.selectedEdge.source, dst = this.selectedEdge.target;
+      this.edgeBusy = true; this.edgeMsg = 'Starting…';
+      try {
+        const r = await fetch('/api/investigate/edge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ src, dst })
+        }).then(r => r.json());
+        this.edgeMsg = r.status === 'running'
+          ? 'An investigation is already running for this case.'
+          : 'Investigating this connection — watch the run trail; reopen the edge when it finishes.';
+      } catch (e) { this.edgeMsg = 'Failed to start: ' + e; }
+      finally { this.edgeBusy = false; }
+    },
+
+    async loadDetail(entityId) {
+      // What it is / where it came from (source + screenshot context) / connected + how.
+      try {
+        const d = await fetch('/api/entity/' + entityId + '/detail').then(r => r.json());
+        if (d.error) return;
+        this.detail = d;
+        // Accurate uncapped counts from the server (the rendered list is sliced to 80).
+        this.inCount = d.in_degree ?? (d.connections || []).filter(c => c.dir === 'in').length;
+        this.outCount = d.out_degree ?? (d.connections || []).filter(c => c.dir === 'out').length;
+        // Type-scope the Enrich dropdown to the transforms valid for THIS node's type
+        // (Maltego-style: right action on the right node).
+        this.loadProvidersForType(d.surface_type || d.type);
+      } catch (e) {}
+    },
+
+    async loadProvidersForType(entityType) {
+      try {
+        const url = entityType ? ('/api/enrich/providers?type=' + encodeURIComponent(entityType))
+                               : '/api/enrich/providers';
+        const data = await fetch(url).then(r => r.json());
+        this.providers = (data.providers || []).sort((a, b) => (b.configured) - (a.configured));
+        // Keep the current pick if still valid, else default to the first ready provider.
+        if (!this.providers.find(p => p.slug === this.enrichProvider)) {
+          const firstReady = this.providers.find(p => p.configured);
+          this.enrichProvider = firstReady ? firstReady.slug : (this.providers[0]?.slug || '');
+        }
+      } catch (e) {}
+    },
+
+    // Isolate the selected node + its directed neighbors ('in' | 'out' | 'all') on canvas.
+    showDirection(dir) {
+      if (!this.selected) return;
+      const node = this.cy.getElementById(String(this.selected.id));
+      if (!node.length) return;
+      const ids = (this.detail?.connections || [])
+        .filter(c => dir === 'all' || c.dir === dir).map(c => String(c.other_id));
+      let keep = node;
+      ids.forEach(i => { const n = this.cy.getElementById(i); if (n.length) keep = keep.union(n); });
+      this.cy.elements().addClass('dimmed');
+      keep.removeClass('dimmed');
+      keep.edgesWith(keep).removeClass('dimmed');
+      this.cy.animate({ fit: { eles: keep, padding: 70 } }, { duration: 400 });
+    },
+
+    // PRD-08: build a selection SET from the node + its directed connections so the
+    // whole neighborhood can be acted on at once. 'in' | 'out' | 'all'.
+    selectConnections(dir) {
+      if (!this.selected) return;
+      const add = (id, name) => {
+        if (!name || this.selectedSet.some(s => String(s.id) === String(id))) return;
+        this.selectedSet.push({ id, name });
+        const n = this.cy.getElementById(String(id)); if (n.length) n.addClass('selected');
+      };
+      add(this.selected.id, this.selected.full_name);
+      (this.detail?.connections || [])
+        .filter(c => dir === 'all' || c.dir === dir)
+        .forEach(c => add(c.other_id, c.other));
+    },
+    clearSelection() {
+      this.selectedSet.forEach(s => {
+        const n = this.cy.getElementById(String(s.id)); if (n.length) n.removeClass('selected');
+      });
+      this.selectedSet = []; this.invMsg = '';
+    },
+    // PRD-05: "this is wrong" on a connection → reject the backing claim. The claims
+    // spine retires the derived edge (cascade) and reprojects; we reload to reflect it.
+    async rejectConnection(c) {
+      if (!c.claim_id) return;
+      try {
+        const d = await fetch('/api/claims/' + c.claim_id + '/reject', { method: 'POST' })
+          .then(r => r.json());
+        if (d.error) return;
+        if (this.selected) this.loadDetail(this.selected.id);  // refresh the panel
+        this.reload();                                         // refresh the canvas
+      } catch (e) {}
+    },
+    // Run the full investigator agent on THIS single node. Watch it live, then refresh
+    // the graph IN PLACE when it finishes — so the new nodes/edges appear right here,
+    // not on another page (the run trail is still on /runs for detail).
+    async investigateThisNode() {
+      if (!this.selected || this.invBusy) return;
+      this.invBusy = true; this.invMsg = 'starting…';
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity: this.selected.full_name }),
+        }).then(r => r.json());
+        if (d.error) { this.invMsg = d.error; this.invBusy = false; return; }
+        this.watchRunThenRefresh();
+      } catch (e) { this.invMsg = 'Could not start.'; this.invBusy = false; }
+    },
+    // Run the full investigator agent on the selected set, then refresh in place.
+    async investigateSelected() {
+      if (!this.selectedSet.length || this.invBusy) return;
+      this.invBusy = true; this.invMsg = 'starting…';
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entities: this.selectedSet.map(s => s.name) }),
+        }).then(r => r.json());
+        if (d.error) { this.invMsg = d.error; this.invBusy = false; return; }
+        this.invMsg = (d.note ? d.note + ' ' : '') + 'investigating…';
+        this.watchRunThenRefresh();
+      } catch (e) { this.invMsg = 'Could not start.'; this.invBusy = false; }
+    },
+    // Poll the run; show live progress in the panel; when it finishes, reload the graph
+    // so the freshly-promoted nodes/edges show up here without a manual refresh.
+    watchRunThenRefresh() {
+      if (this.invTimer) return;
+      this.invTimer = setInterval(async () => {
+        let s;
+        try { s = await fetch('/api/investigate/status').then(r => r.json()); }
+        catch (e) { return; }
+        if (s.progress) {
+          const p = s.progress;
+          this.invMsg = p.targets_total
+            ? (p.targets_done + '/' + p.targets_total + ' targets · ' + p.findings + ' findings')
+            : ((p.phase || 'investigating') + '… ' + (p.findings || 0) + ' findings');
+        }
+        if (s.status === 'running') return;
+        clearInterval(this.invTimer); this.invTimer = null;
+        this.invBusy = false;
+        // A no-work run did nothing — say so LOUD and keep the message up; don't pretend
+        // it succeeded. Stopped keeps what landed. Otherwise refresh in place.
+        if (s.status === 'no_work') {
+          this.invMsg = (s.result && s.result.note) || 'the agent ran no tools — check OSINT/MCP setup';
+          return;  // nothing landed, no graph change to pull in
+        }
+        this.invMsg = s.status === 'stopped' ? 'stopped — kept what was found'
+                                             : 'done — updating the graph…';
+        await this.reload();
+        if (this.selected) this.loadDetail(this.selected.id);  // refresh the open panel too
+        setTimeout(() => { this.invMsg = ''; this.clearSelection(); }, 2500);
+      }, 2000);
+    },
+
+    // Filter the CURRENT graph to one cluster (deep-state, then reload).
+    showCluster(clusterId) {
+      this.clusterId = clusterId; this.focus = null;
+      this.minScore = 0; this.inClusterOnly = false; this.meaningfulOnly = false;
+      this.reload();
+    },
+    // Open a fresh graph focused on a cluster / a node, in a new tab.
+    openClusterNewGraph(clusterId) { window.open('/graph?cluster_id=' + clusterId, '_blank'); },
+    openNodeNewGraph(id) { window.open('/graph?focus=' + id, '_blank'); },
+
+    // Shorten a node label for the canvas the way graph tools do: drop the scheme, keep
+    // the host + a little path, ellipsize anything long. The full value is preserved in
+    // data(full_name) (the click-through card shows it in full).
+    shortLabel(val) {
+      let s = String(val || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      const MAX = 26;
+      if (s.length > MAX) s = s.slice(0, MAX - 1) + '…';
+      return s;
+    },
+
+    // A case change during a live run → grow the REAL graph incrementally (the server
+    // lands each discovery as a real node/edge). Otherwise (filter change, manual edit)
+    // → a normal full reload.
+    async onCaseChanged() {
+      if (this.runActive) await this.growGraph();
+      else await this.reload();
+    },
+
+    // Incrementally grow the REAL graph as the dig lands nodes: fetch the case graph, add
+    // ONLY what's not already on the canvas (real styling, labeled edges via data(rel_type)),
+    // each new dot popping in from OPEN SPACE beyond the cluster, then force-spread so
+    // nothing stacks. The graph you watch building IS the one that persists — no preview,
+    // no end-of-run swap (founder: one graph). Existing nodes keep their positions.
+    async growGraph() {
+      const params = new URLSearchParams({ min_score: this.minScore });
+      params.set('in_cluster_only', this.inClusterOnly);
+      params.set('co_occurrence', this.coOccurrence);
+      params.set('meaningful_only', this.meaningfulOnly);
+      if (this.focus) params.set('focus', this.focus);
+      if (this.showAll) params.set('show_all', 'true');
+      let data;
+      try { data = await fetch('/api/graph?' + params).then(r => r.json()); }
+      catch (e) { return; }
+      this.computeFacets(data.nodes);
+      const shapeMap = { operator: 'ellipse', channel: 'diamond', ioc: 'octagon', infra: 'rectangle', source: 'triangle' };
+      let added = 0;
+      for (const n of data.nodes) {
+        if (this.cy.getElementById(String(n.data.id)).length) continue;   // already on canvas
+        n.data.color = this.roleColor(n.data.role);
+        n.data.clusterColor = this.clusterColor(n.data.cluster_ids);
+        n.data.shape = shapeMap[n.data.role] || 'ellipse';
+        n.data.borderStyle = n.data.origin === 'osint' ? 'dashed'
+                           : n.data.origin === 'manual' ? 'dotted' : 'solid';
+        if (!n.data.full_name) n.data.full_name = n.data.label || '';
+        n.data.label = this.shortLabel(n.data.full_name);
+        if (!n.data.thumbnail) delete n.data.thumbnail;
+        this._addGrownNode(n);
+        added++;
+      }
+      for (const e of data.edges) {
+        if (this.cy.getElementById(String(e.data.id)).length) continue;
+        // Both endpoints must be on the canvas or cytoscape throws.
+        if (!this.cy.getElementById(String(e.data.source)).length ||
+            !this.cy.getElementById(String(e.data.target)).length) continue;
+        e.data.color = e.data.co_occurrence ? '#A8A29E' : this.confColor(e.data.confidence);
+        e.data.width = e.data.co_occurrence ? 1
+                     : e.data.confidence === 'high' ? 2.5
+                     : e.data.confidence === 'medium' ? 1.5 : 1;
+        const edge = this.cy.add({ group: 'edges', data: e.data });
+        edge.style({ 'opacity': 0 });
+        edge.animate({ style: { 'opacity': 1 } }, { duration: 300, easing: 'ease-out-cubic' });
+      }
+      this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
+      this.edgeCount = this.cy.edges().length;
+      if (added) this._spreadAndFit(); else this._frame();
+    },
+
+    // Add a real node in OPEN SPACE beyond the current cluster (ring at a random angle),
+    // not on the pile — so a new branch reads as "a new piece of the tree", then the
+    // force-spread settles it. Size/color come from the node's real data (score/role).
+    _addGrownNode(n) {
+      const nodes = this.cy.nodes();
+      let pos;
+      if (!nodes.length) {
+        pos = { x: 0, y: 0 };
+      } else {
+        const bb = nodes.boundingBox();
+        const cx = (bb.x1 + bb.x2) / 2, cy = (bb.y1 + bb.y2) / 2;
+        const r = Math.max(bb.w, bb.h) / 2 + 160;
+        const a = Math.random() * Math.PI * 2;
+        pos = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+      }
+      const node = this.cy.add({ group: 'nodes', data: n.data, position: pos });
+      node.style({ 'opacity': 0 });
+      node.animate({ style: { 'opacity': 1 } }, { duration: 340, easing: 'ease-out-cubic' });
+    },
+
+    // After a burst lands, force-spread the dots so they bounce apart instead of stacking
+    // (the "online graph" feel) — then reframe with a zoom cap so a few dots don't balloon
+    // to fill the screen. randomize:false → relax from where things are, not a reshuffle.
+    _spreadAndFit() {
+      if (this._spreadBusy || !this.cy.nodes().length) { this._frame(); return; }
+      this._spreadBusy = true;
+      if (this.layoutName !== 'cose') {
+        // A non-force layout would be scrambled by a cose relaxation pass —
+        // re-apply the analyst's chosen layout over the grown graph instead.
+        this.cy.layout(Object.assign(this._layoutOpts(), {
+          fit: false, stop: () => { this._spreadBusy = false; this._frame(); },
+        })).run();
+        return;
+      }
+      this.cy.layout({
+        name: 'cose', animate: true, animationDuration: 500, randomize: false,
+        nodeDimensionsIncludeLabels: true, idealEdgeLength: 130, nodeRepulsion: 16000,
+        gravity: 0.2, numIter: 700, fit: false,
+        stop: () => { this._spreadBusy = false; this._frame(); },
+      }).run();
+    },
+
+    // Fit to the graph, but never zoom IN past a sane level — few dots must stay dot-sized,
+    // not fill the viewport.
+    _frame() {
+      if (!this.cy.nodes().length) return;
+      this.cy.fit(undefined, 70);
+      const MAX = 1.1;
+      if (this.cy.zoom() > MAX) {
+        this.cy.zoom({ level: MAX,
+                       renderedPosition: { x: this.cy.width() / 2, y: this.cy.height() / 2 } });
+      }
+    },
+
+    applyDeltas(d) {
+      if (!d) return;
+      let added = false;
+      (d.add_nodes || []).forEach(n => {
+        if (this.cy.getElementById(n.data.id).length) return;
+        n.data.color = this.roleColor(n.data.role);
+        n.data.clusterColor = this.clusterColor(n.data.cluster_ids);
+        n.data.shape = 'ellipse';
+        n.data.borderStyle = n.data.origin === 'osint' ? 'dashed'
+                           : n.data.origin === 'manual' ? 'dotted' : 'solid';
+        this.cy.add({ group: 'nodes', data: n.data });
+        added = true;
+      });
+      (d.add_edges || []).forEach(e => {
+        if (this.cy.getElementById(e.data.id).length) return;
+        // Cytoscape throws if an endpoint node isn't on the canvas — skip such edges.
+        if (!this.cy.getElementById(String(e.data.source)).length ||
+            !this.cy.getElementById(String(e.data.target)).length) return;
+        e.data.color = this.confColor(e.data.confidence);
+        e.data.width = 1.5;
+        this.cy.add({ group: 'edges', data: e.data });
+      });
+      (d.hide_ids || []).forEach(id => {
+        // If we just hid the selected node, close its (now stale) panel.
+        if (this.selected && String(this.selected.id) === String(id)) {
+          this.selected = null; this.detail = null;
+        }
+        const n = this.cy.getElementById(String(id)); if (n.length) n.remove();
+      });
+      if (d.highlight_ids && d.highlight_ids.length) {
+        this.cy.elements().addClass('dimmed');
+        d.highlight_ids.forEach(id => {
+          const n = this.cy.getElementById(String(id));
+          if (n.length) { n.removeClass('dimmed'); n.connectedEdges().removeClass('dimmed'); }
+        });
+      }
+      if (d.focus_id) {
+        const n = this.cy.getElementById(String(d.focus_id));
+        if (n.length) { this.onNodeTap(n); this.cy.animate({ center: { eles: n }, zoom: 1.3 }, { duration: 400 }); }
+      }
+      if (d.undo) this.lastHidden = d.undo;
+      // A live run can land a 15+ leaf burst incrementally — fold it the same
+      // way the initial load does (idempotent: existing buckets are skipped).
+      if (added) this._buildCollections();
+      this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
+      this.edgeCount = this.cy.edges().length;
+      // Incremental relayout derives from _layoutOpts (single source) and only
+      // overrides the incremental-specific fields.
+      if (added) this.cy.layout(Object.assign(this._layoutOpts(),
+        { fit: false, animationDuration: 400 },
+        this.layoutName === 'cose' ? { randomize: false } : {})).run();
+    },
+
+    async loadHistory(entityId) {
+      // Past lookups for this node — browse cached results without re-running.
+      try {
+        const d = await fetch('/api/enrich/history?entity_id=' + entityId + '&limit=25').then(r => r.json());
+        this.pastRuns = (d.runs || []).filter(r => r.status === 'success' && (r.results || []).length);
+      } catch (e) { this.pastRuns = []; }
+    },
+
+    viewRun(run) {
+      // Show a past run's cached results — no new search.
+      this.activeRunId = run.id;
+      this.enrichError = '';
+      this.enrichResults = (run.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
+    },
+
+    prettyJson(s) {
+      if (!s) return '';
+      try { return JSON.stringify(typeof s === 'string' ? JSON.parse(s) : s, null, 2).slice(0, 4000); }
+      catch (e) { return String(s).slice(0, 4000); }
+    },
+
+    async runEnrich() {
+      if (!this.selected || !this.enrichProvider) return;
+      this.enrichBusy = true; this.enrichError = ''; this.enrichResults = [];
+      try {
+        const run = await fetch('/api/enrich/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: this.enrichProvider, query: this.selected.full_name,
+            entity_id: parseInt(this.selected.id), investigation: ACTIVE_CASE || null,
+          }),
+        }).then(r => r.json());
+        if (run.error || run.status === 'error') {
+          this.enrichError = run.error || 'enrichment failed'; return;
+        }
+        const detail = await fetch('/api/enrich/run/' + run.run_id).then(r => r.json());
+        this.enrichResults = (detail.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
+        this.activeRunId = run.run_id;
+        if (!this.enrichResults.length) this.enrichError = 'No results returned.';
+        this.loadHistory(this.selected.id);   // new run joins the browsable history
+      } catch (e) {
+        this.enrichError = 'Could not reach the server.';
+      } finally {
+        this.enrichBusy = false;
+      }
+    },
+
+    async promote(res) {
+      try {
+        const out = await fetch('/api/enrich/result/' + res.id + '/promote', { method: 'POST' })
+          .then(r => r.json());
+        if (out.error) { this.enrichError = out.error; return; }
+        res.promoted = true;
+        this.addNodeToCanvas(out, 'enriched');
+      } catch (e) {
+        this.enrichError = 'Promote failed.';
+      }
+    },
+
+    async addManualNode() {
+      this.addError = '';
+      const n = this.newNode;
+      if (!n.name.trim()) return;
+      try {
+        const out = await fetch('/api/node/manual', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: n.name.trim(), entity_type: n.type, thumbnail: n.thumbnail.trim() || null,
+            link_to: (n.link && this.selected) ? parseInt(this.selected.id) : null,
+          }),
+        }).then(r => r.json());
+        if (out.error) { this.addError = out.error; return; }
+        this.addNodeToCanvas(out, 'linked');
+        this.newNode = { name: '', type: n.type, thumbnail: '', link: false };
+        this.showAdd = false;
+      } catch (e) { this.addError = 'Could not reach the server.'; }
+    },
+
+    addNodeToCanvas(out, relType) {
+      const nid = String(out.entity_id);
+      const srcId = out.linked_to ? String(out.linked_to) : null;
+      const srcEl = srcId ? this.cy.getElementById(srcId) : null;
+      if (this.cy.getElementById(nid).length === 0) {
+        const anchor = (srcEl && srcEl.length) ? srcEl
+          : (this.selected ? this.cy.getElementById(String(this.selected.id)) : null);
+        const pos = (anchor && anchor.length) ? anchor.position() : { x: 0, y: 0 };
+        const data = {
+          id: nid, label: (out.name || '').slice(0, 40), full_name: out.name,
+          type: out.type, role: '', score: 12, degree: 1, report_count: 1,
+          cluster_ids: [], is_bridge: false,
+          color: this.roleColor(''), clusterColor: '#0F766E', shape: 'ellipse',
+          origin: relType === 'enriched' ? 'osint' : 'manual',
+          borderStyle: relType === 'enriched' ? 'dashed' : 'dotted',
+        };
+        if (out.thumbnail) data.thumbnail = out.thumbnail;
+        this.cy.add({ group: 'nodes', data, position: { x: pos.x + 90, y: pos.y + 70 } });
+      }
+      if (srcEl && srcEl.length) {
+        const eid = 'e' + srcId + '-' + nid + '-' + relType;
+        if (this.cy.getElementById(eid).length === 0) {
+          this.cy.add({ group: 'edges', data: {
+            id: eid, source: srcId, target: nid, rel_type: relType,
+            confidence: 'medium', color: this.confColor('medium'), width: 1.5,
+          }});
+        }
+      }
+      this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
+      this.edgeCount = this.cy.edges().length;
+      const node = this.cy.getElementById(nid);
+      this.cy.animate({ center: { eles: node }, zoom: 1.3 }, { duration: 450 });
+      node.addClass('neighbor');
+      setTimeout(() => node.removeClass('neighbor'), 1800);
+    },
+
+    pickProviderFor(t) {
+      // Nudge to a provider that returns useful data for this node's type.
+      t = (t || '').toLowerCase();
+      const prefer = t === 'ip' ? ['infra', 'virustotal']
+        : t.includes('domain') ? ['crtsh', 'infra', 'virustotal']
+        : (t === 'url' || t.includes('telegram')) ? ['jina', 'virustotal']
+        : (t === 'email' || t.includes('hash')) ? ['virustotal'] : [];
+      for (const p of prefer) {
+        if (this.providers.find(x => x.slug === p && x.configured)) { this.enrichProvider = p; return; }
+      }
+    },
+  }
+}
+</script>
+{% endblock %}
+
+{# The chat is docked inline in the split-view above — suppress the global corner bubble
+   so there's exactly ONE caseChat() on this page. #}
+{% block chat %}{% endblock %}

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ b.title }}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --accent: {{ b.accent }}; --ink:#16181d; --muted:#5b6470; --line:#e3e6ea; --soft:#f6f7f9; }
+  * { box-sizing: border-box; }
+  body { font-family:'Inter',system-ui,-apple-system,sans-serif; color:var(--ink);
+         background:#eceef1; margin:0; line-height:1.55; font-size:15px; }
+  h1,h2,h3,h4 { font-family:'Source Serif 4',Georgia,serif; line-height:1.2; }
+  a { color:var(--accent); }
+  .page { background:#fff; width:8.5in; min-height:11in; margin:24px auto; padding:0.9in 0.85in;
+          box-shadow:0 2px 14px rgba(0,0,0,.12); }
+  .toolbar { position:sticky; top:0; z-index:10; text-align:center; padding:10px;
+             background:rgba(20,24,31,.92); }
+  .toolbar button { font:inherit; font-size:13px; font-weight:600; cursor:pointer; border:0;
+                    background:var(--accent); color:#fff; padding:8px 16px; border-radius:6px; }
+  .toolbar span { color:#aeb6c2; font-size:12px; margin-left:10px; }
+
+  /* Cover */
+  .cover { display:flex; flex-direction:column; justify-content:center; min-height:9.2in; }
+  .cover .logo { max-height:64px; margin-bottom:36px; }
+  .cover .eyebrow { text-transform:uppercase; letter-spacing:.18em; font-size:12px;
+                    font-weight:600; color:var(--accent); }
+  .cover h1 { font-size:38px; margin:14px 0 8px; font-weight:700; }
+  .cover .client { font-size:19px; color:var(--muted); }
+  .cover .rule { height:4px; width:80px; background:var(--accent); margin:28px 0; }
+  .cover .meta { font-size:13px; color:var(--muted); }
+  .cover .meta b { color:var(--ink); font-weight:600; }
+  .confidential { margin-top:auto; padding-top:40px; font-size:11px; color:var(--muted);
+                  text-transform:uppercase; letter-spacing:.1em; }
+
+  /* Section chrome */
+  .section { padding-top:6px; }
+  .section > h2 { font-size:22px; border-bottom:2px solid var(--accent); padding-bottom:6px;
+                  margin:0 0 16px; }
+  .lead { color:var(--muted); font-size:13px; margin:-8px 0 18px; }
+  .kpis { display:flex; gap:14px; margin:18px 0; }
+  .kpi { flex:1; border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .kpi .n { font-size:26px; font-weight:700; font-family:'Source Serif 4',serif; }
+  .kpi .l { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; margin:8px 0; }
+  th { text-align:left; background:var(--soft); color:var(--muted); font-weight:600;
+       text-transform:uppercase; letter-spacing:.05em; font-size:11px; padding:8px 10px;
+       border-bottom:2px solid var(--line); }
+  td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:nth-child(even) td { background:#fafbfc; }
+  .num { font-variant-numeric:tabular-nums; text-align:right; }
+  .pill { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px;
+          background:color-mix(in srgb, var(--accent) 14%, white); color:var(--accent);
+          border:1px solid color-mix(in srgb, var(--accent) 30%, white); }
+  .mono { font-family:'JetBrains Mono',ui-monospace,monospace; }
+
+  .actor { border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:6px;
+           padding:14px 16px; margin:12px 0; }
+  .actor h3 { margin:0 0 4px; font-size:17px; }
+  .actor .why { color:var(--muted); font-size:13px; margin-top:6px; }
+  .dossier { page-break-inside:avoid; border:1px solid var(--line); border-radius:6px;
+             padding:16px 18px; margin:14px 0; }
+  .dossier h3 { margin:0; font-size:18px; }
+  .dossier .src { font-size:11px; color:var(--muted); }
+  .note { background:color-mix(in srgb, var(--accent) 6%, white); border:1px solid var(--line);
+          border-radius:6px; padding:10px 12px; margin-top:10px; font-size:13px; }
+  .note .lbl { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--accent);
+               font-weight:600; }
+  .md h1 { font-size:20px; } .md h2 { font-size:17px; color:var(--accent); } .md h3 { font-size:15px; }
+  .md p { margin:.5em 0; } .md ul { margin:.4em 0 .4em 1.1em; } .md li { margin:.2em 0; }
+  .empty { color:var(--muted); font-style:italic; font-size:13px; }
+  .footer { margin-top:18px; padding-top:10px; border-top:1px solid var(--line);
+            font-size:11px; color:var(--muted); display:flex; justify-content:space-between; }
+
+  @media print {
+    body { background:#fff; font-size:11.5pt; }
+    .toolbar { display:none; }
+    .page { box-shadow:none; margin:0; width:auto; min-height:auto; padding:0; }
+    .section { page-break-before:always; }
+    .cover { page-break-after:always; min-height:9in; }
+    @page { margin:0.7in; }
+  }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button onclick="window.print()">Print / Save as PDF</button>
+  <span>Save as PDF from the print dialog. This page is the client deliverable.</span>
+</div>
+
+<!-- COVER -->
+<div class="page cover">
+  {% if b.logo %}<img class="logo" src="{{ b.logo }}" alt="">{% endif %}
+  <div class="eyebrow">Confidential Intelligence Report</div>
+  <h1>{{ b.title }}</h1>
+  {% if b.client %}<div class="client">Prepared for {{ b.client }}</div>{% endif %}
+  <div class="rule"></div>
+  <div class="meta">
+    <div><b>Case:</b> {{ d.case.case_name or d.case.slug }}</div>
+    <div><b>Date:</b> {{ b.generated_at }}</div>
+    <div><b>Prepared by:</b> {{ b.prepared_by }}</div>
+    <div><b>Scope:</b> {{ d.stats.reports }} report{{ '' if d.stats.reports == 1 else 's' }}, {{ d.stats.entities }} entities</div>
+  </div>
+  <div class="confidential">Confidential — for the named recipient only. Do not redistribute.</div>
+</div>
+
+<div class="page">
+
+  {% if 'summary' in sel %}
+  <div class="section">
+    <h2>Executive Summary</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="n">{{ d.stats.reports }}</div><div class="l">Reports</div></div>
+      <div class="kpi"><div class="n">{{ d.stats.entities }}</div><div class="l">Entities</div></div>
+      <div class="kpi"><div class="n">{{ d.top_actors|length }}</div><div class="l">Priority actors</div></div>
+      <div class="kpi"><div class="n">{{ d.iocs|length }}</div><div class="l">Indicators</div></div>
+    </div>
+    <div id="summary-body" class="md"></div>
+    <div id="summary-empty" class="empty" style="display:none">No synthesis brief generated for this case yet.</div>
+  </div>
+  {% endif %}
+
+  {% if 'actors' in sel and d.top_actors %}
+  <div class="section">
+    <h2>Priority Actors</h2>
+    <div class="lead">Ranked by attention score across this case's reporting.</div>
+    {% for a in d.top_actors %}
+    <div class="actor">
+      <h3>{{ a.name }} <span class="pill">{{ a.role or a.entity_type }}{% if a.sub_role %} · {{ a.sub_role }}{% endif %}</span></h3>
+      {% if a.why %}<div class="why">{{ a.why }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if 'dossiers' in sel %}
+  <div class="section">
+    <h2>Actor Dossiers</h2>
+    <div id="dossiers-body"></div>
+    <div id="dossiers-empty" class="empty" style="display:none">No dossiers or analyst notes recorded for the top actors.</div>
+  </div>
+  {% endif %}
+
+  {% if 'iocs' in sel %}
+  <div class="section">
+    <h2>Indicators of Compromise</h2>
+    {% if d.iocs %}
+    <table>
+      <thead><tr><th>Indicator</th><th>Type</th><th class="num">Reports</th></tr></thead>
+      <tbody>
+        {% for i in d.iocs %}
+        <tr><td class="mono">{{ i.canonical_name }}</td><td>{{ i.entity_type }}</td><td class="num">{{ i.reports }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">No indicators extracted for this case.</div>{% endif %}
+  </div>
+  {% endif %}
+
+  {% if 'crosscase' in sel %}
+  <div class="section">
+    <h2>Cross-Case Links</h2>
+    <div class="lead">Actors and indicators in this case that also appear in other investigations.</div>
+    {% if d.cross_case %}
+    <table>
+      <thead><tr><th>Entity</th><th>Type</th><th>Also appears in</th></tr></thead>
+      <tbody>
+        {% for c in d.cross_case %}
+        <tr><td class="mono">{{ c.name }}</td><td>{{ c.type }}</td><td>{{ c.also_in|join(', ') }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">No cross-case overlaps detected.</div>{% endif %}
+  </div>
+  {% endif %}
+
+  {% if 'methodology' in sel %}
+  <div class="section">
+    <h2>Methodology &amp; Provenance</h2>
+    <p>Findings are derived from {{ d.stats.reports }} source report{{ '' if d.stats.reports == 1 else 's' }} ingested into this case. Entities and relationships are extracted automatically, then reviewed by an analyst. Attention scoring is a rank-by-priority signal (role, cross-report presence, network centrality, and analyst-flagged priors), not a maliciousness rating.</p>
+    <p>Where a newer report contradicted an earlier one, the conflicting claim was superseded by analyst decision and the prior assertion retained in the audit trail. Analyst notes and edited dossiers reflect knowledge beyond the source reporting.</p>
+    <table>
+      <thead><tr><th>Source report</th><th>Type</th><th>Ingested</th></tr></thead>
+      <tbody>
+        {% for r in d.reports %}
+        <tr><td>{{ r.title or '(untitled)' }}</td><td>{{ r.source_type }}</td><td class="mono">{{ r.ingested_at[:10] if r.ingested_at }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="footer">
+    <span>{{ b.title }}</span>
+    <span>Confidential · {{ b.generated_at }} · prepared by {{ b.prepared_by }}</span>
+  </div>
+</div>
+
+<script type="application/json" id="report-md">{{ {'summary': (d.exec_summary or '') if 'summary' in sel else '', 'dossiers': d.dossiers if 'dossiers' in sel else []} | tojson }}</script>
+<script>
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function safeHref(u){ return /^(https?:|mailto:|#|\/)/i.test((u||'').trim()) ? u : '#'; }
+  function md(s){
+    if(!s) return '';
+    let h=esc(s);
+    h=h.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>');
+    h=h.replace(/^(?:- (.+)(?:\n|$))+/gm,b=>'<ul>'+b.trim().split('\n').map(l=>'<li>'+l.replace(/^- /,'')+'</li>').join('')+'</ul>');
+    h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+    h=h.replace(/\[([^\]]+)\]\(([^)]+)\)/g,(m,t,u)=>'<a href="'+esc(safeHref(u))+'">'+t+'</a>');
+    h=h.split(/\n\n+/).map(p=>/^<(h\d|ul|table)/.test(p.trim())?p:(p.trim()?'<p>'+p+'</p>':'')).join('\n');
+    return h;
+  }
+  (function(){
+    const data = JSON.parse(document.getElementById('report-md').textContent);
+    const sb = document.getElementById('summary-body');
+    if (sb){ if(data.summary){ sb.innerHTML = md(data.summary); } else { sb.style.display='none'; const e=document.getElementById('summary-empty'); if(e) e.style.display='block'; } }
+    const db = document.getElementById('dossiers-body');
+    if (db){
+      if(!data.dossiers || !data.dossiers.length){ const e=document.getElementById('dossiers-empty'); if(e) e.style.display='block'; }
+      else { db.innerHTML = data.dossiers.map(x =>
+        '<div class="dossier"><h3>'+esc(x.name)+'</h3>'+
+        '<div class="src">'+(x.source==='analyst'?'Analyst-authored':'AI-generated, analyst-reviewed')+'</div>'+
+        (x.body?'<div class="md">'+md(x.body)+'</div>':'')+
+        (x.notes?'<div class="note"><div class="lbl">Analyst note</div>'+md(x.notes)+'</div>':'')+
+        '</div>').join(''); }
+    }
+  })();
+</script>
+</body>
+</html>

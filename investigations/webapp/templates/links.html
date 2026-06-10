@@ -1,0 +1,92 @@
+{% extends "_layout.html" %}
+{% block title %}Image links · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto" x-data="linksView()">
+  <div class="flex items-center justify-between mb-4">
+    <h1 class="text-xl font-semibold">Image links{% if links_case %} · <span class="font-mono text-accent">{{ links_case }}</span>{% endif %}</h1>
+    {% if links_case %}
+    <button @click="discover()" :disabled="busy"
+            class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+      <span x-show="!discovering">Find image links</span>
+      <span x-show="discovering" x-cloak>Scanning text…</span>
+    </button>
+    {% endif %}
+  </div>
+
+  {% if not links_case %}
+    <p class="text-ink-muted">Select a single case to find its linked images.</p>
+  {% else %}
+  <p class="text-xs text-ink-muted mb-3">
+    Image URLs found in this case's report text. <span class="text-ink">Nothing is downloaded
+    automatically.</span> Each <span class="text-ink">Scan</span> reaches out to that URL's
+    server and saves + OCRs the image as an asset — you decide per link.
+  </p>
+
+  <div x-show="!items.length" x-cloak class="text-ink-muted text-sm py-10 text-center">
+    No image links yet. Click <span class="text-ink">Find image links</span> to scan the reports.
+  </div>
+
+  <ul class="space-y-2">
+    <template x-for="c in items" :key="c.id">
+      <li class="bg-bg-card border border-bg-border rounded-lg p-3 flex items-center gap-3">
+        <span class="shrink-0 w-16 text-center text-xs rounded px-1.5 py-0.5"
+              :class="{
+                'bg-bg-soft text-ink-muted': c.status==='pending',
+                'bg-conf-high/20 text-conf-high': c.status==='fetched',
+                'bg-bg-soft text-ink-faint': c.status==='skipped',
+                'bg-sev-high/20 text-sev-high': c.status==='error'
+              }" x-text="c.status"></span>
+        <div class="min-w-0 flex-1">
+          <a :href="c.url" target="_blank" rel="noopener"
+             class="text-sm text-accent truncate block" x-text="c.url"></a>
+          <div class="text-xs text-ink-faint" x-text="c.domain + (c.error ? ' · ' + c.error : '')"></div>
+        </div>
+        <div class="shrink-0 flex gap-1" x-show="c.status==='pending'">
+          <button @click="scan(c)" :disabled="c._busy"
+                  class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+            <span x-show="!c._busy">Scan</span><span x-show="c._busy" x-cloak>fetching…</span>
+          </button>
+          <button @click="skip(c)" :disabled="c._busy"
+                  class="text-xs px-3 py-1.5 text-ink-muted hover:bg-bg-soft rounded">Skip</button>
+        </div>
+        <span x-show="c.status==='fetched'" x-cloak class="shrink-0 text-xs text-conf-high">✓ captured</span>
+        <button x-show="c.status==='error'" x-cloak @click="scan(c)"
+                class="shrink-0 text-xs px-3 py-1.5 text-ink-muted hover:bg-bg-soft rounded">Retry</button>
+      </li>
+    </template>
+  </ul>
+  {% endif %}
+</div>
+<script>
+function linksView() {
+  return {
+    // _busy must start as a real boolean — Alpine's :disabled won't clear the attribute
+    // for an `undefined` value, which left every Scan button greyed out.
+    items: ({{ candidates|tojson }}).map(c => ({ ...c, _busy: false })),
+    busy: false, discovering: false,
+    async discover() {
+      this.discovering = true; this.busy = true;
+      try {
+        const d = await fetch('/api/links/discover', { method: 'POST' }).then(r => r.json());
+        if (d.candidates) this.items = d.candidates.map(c => ({ ...c, _busy: false }));
+      } catch (e) {}
+      this.discovering = false; this.busy = false;
+    },
+    async scan(c) {
+      c._busy = true; c.error = '';
+      try {
+        const d = await fetch('/api/links/' + c.id + '/scan', { method: 'POST' }).then(r => r.json());
+        c.status = d.status; c.error = d.error || '';
+      } catch (e) { c.error = 'request failed'; }
+      c._busy = false;
+    },
+    async skip(c) {
+      c._busy = true;
+      try { await fetch('/api/links/' + c.id + '/skip', { method: 'POST' }); c.status = 'skipped'; }
+      catch (e) {}
+      c._busy = false;
+    },
+  };
+}
+</script>
+{% endblock %}

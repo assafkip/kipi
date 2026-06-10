@@ -1,0 +1,138 @@
+{% extends "_layout.html" %}
+{% block title %}Bridges · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="bridgesView()" x-init="load()" class="max-w-7xl mx-auto">
+  {% include "_entity_views.html" %}
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-display font-semibold tracking-tight">Cross-cluster bridges</h1>
+      <div class="text-xs text-ink-muted">Entities and edges that span multiple clusters — network structure connectors</div>
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-ink-muted">min clusters:</label>
+      <select x-model.number="minClusters" @change="load()" class="bg-bg-card border border-bg-border rounded px-2 py-1 text-sm">
+        <option value="2">2+</option>
+        <option value="3">3+</option>
+        <option value="4">4+</option>
+        <option value="5">5+</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Bridge entities -->
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden mb-6">
+    <div class="px-4 py-2 bg-bg-soft border-b border-bg-border flex items-center justify-between">
+      <div class="text-xs uppercase tracking-wider text-ink-muted">
+        Entities spanning <span x-text="minClusters"></span>+ clusters (<span x-text="bridges.length"></span>)
+      </div>
+      <div class="text-xs text-ink-muted">sort: cluster span → threat score</div>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-4 py-2">Entity</th>
+          <th class="text-left px-4 py-2">Role / Function</th>
+          <th class="text-left px-4 py-2">Clusters</th>
+          <th class="text-right px-4 py-2 w-20">#</th>
+          <th class="text-right px-4 py-2 w-20">Score</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        <template x-for="b in bridges" :key="b.id">
+          <tr class="hover:bg-bg-soft">
+            <td class="px-4 py-2.5">
+              <a :href="'/entity/' + b.id" class="font-mono font-semibold hover:text-accent" x-text="b.canonical_name"></a>
+              <template x-if="b.seed_weight && b.seed_weight > 0">
+                <span class="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/15 text-sev-high rounded">SEED</span>
+              </template>
+            </td>
+            <td class="px-4 py-2.5">
+              <span class="role-pill" :class="'role-' + (b.role || '')" x-text="b.role || b.entity_type"></span>
+              <template x-if="b.sub_role">
+                <span class="sub-role-pill ml-1" :class="'sub-role-' + b.sub_role" :title="b.sub_role_reason || ''" x-text="b.sub_role"></span>
+              </template>
+            </td>
+            <td class="px-4 py-2.5">
+              <div class="flex flex-wrap gap-1">
+                <template x-for="c in b.clusters" :key="c.id">
+                  <a :href="'/graph?cluster_id=' + c.id"
+                     class="cluster-chip hover:opacity-80"
+                     :style="window.clusterChipStyle(c.id)"
+                     x-text="c.name"></a>
+                </template>
+              </div>
+            </td>
+            <td class="px-4 py-2.5 text-right font-mono font-semibold" x-text="b.cluster_count"></td>
+            <td class="px-4 py-2.5 text-right font-mono" x-text="Math.round(b.threat_score)"></td>
+          </tr>
+        </template>
+        <tr x-show="bridges.length === 0">
+          <td colspan="5" class="text-center py-8 text-ink-muted">No entities span this many clusters.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Cross-cluster typed edges -->
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <div class="px-4 py-2 bg-bg-soft border-b border-bg-border flex items-center justify-between">
+      <div class="text-xs uppercase tracking-wider text-ink-muted">
+        Typed edges across clusters (<span x-text="crossEdges.length"></span>)
+      </div>
+      <input type="text" x-model="edgeFilter" placeholder="filter…" class="bg-bg-soft border border-bg-border rounded px-3 py-1 text-xs">
+    </div>
+    <ul class="divide-y divide-bg-border max-h-[600px] overflow-y-auto">
+      <template x-for="(e, idx) in filteredEdges()" :key="idx">
+        <li class="px-4 py-2 text-sm hover:bg-bg-soft">
+          <div class="flex items-center gap-2 flex-wrap">
+            <a :href="'/graph?cluster_id=' + e.src_cluster_id"
+               class="cluster-chip"
+               :style="window.clusterChipStyle(e.src_cluster_id)"
+               x-text="e.src_cluster"></a>
+            <a :href="'/entity/' + e.src_id" class="font-mono hover:text-accent" x-text="e.src_name"></a>
+            <span class="text-xs text-accent" x-text="e.rel_type"></span>
+            <span class="text-ink-muted">→</span>
+            <a :href="'/entity/' + e.dst_id" class="font-mono hover:text-accent" x-text="e.dst_name"></a>
+            <a :href="'/graph?cluster_id=' + e.dst_cluster_id"
+               class="cluster-chip"
+               :style="window.clusterChipStyle(e.dst_cluster_id)"
+               x-text="e.dst_cluster"></a>
+            <span class="ml-auto text-[10px]" :class="'conf-' + (e.confidence || 'medium')" x-text="e.confidence || 'med'"></span>
+          </div>
+          <div x-show="e.evidence" class="text-xs text-ink-muted mt-1 ml-2 italic" x-text="e.evidence"></div>
+        </li>
+      </template>
+    </ul>
+  </div>
+</div>
+
+<script>
+function bridgesView() {
+  return {
+    bridges: [],
+    crossEdges: [],
+    minClusters: 2,
+    edgeFilter: '',
+
+    async load() {
+      const params = new URLSearchParams({ min_clusters: this.minClusters, limit: 200 });
+      const d = await fetch('/api/bridges?' + params).then(r => r.json());
+      this.bridges = d.bridges || [];
+      this.crossEdges = d.cross_edges || [];
+    },
+
+    filteredEdges() {
+      if (!this.edgeFilter) return this.crossEdges;
+      const q = this.edgeFilter.toLowerCase();
+      return this.crossEdges.filter(e =>
+        (e.src_name || '').toLowerCase().includes(q) ||
+        (e.dst_name || '').toLowerCase().includes(q) ||
+        (e.src_cluster || '').toLowerCase().includes(q) ||
+        (e.dst_cluster || '').toLowerCase().includes(q) ||
+        (e.rel_type || '').toLowerCase().includes(q)
+      );
+    },
+  }
+}
+</script>
+{% endblock %}

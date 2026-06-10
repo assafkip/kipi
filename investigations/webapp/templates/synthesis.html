@@ -1,0 +1,98 @@
+{% extends "_layout.html" %}
+{% block title %}Brief · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto" x-data="briefActions()">
+  {% include "_output_views.html" %}
+
+  {# In-app regenerate closes the input → findings → deliverable loop: promote a
+     finding, then refresh the brief here without dropping to a terminal. #}
+  {% if can_regen %}
+  <div class="flex items-center justify-between gap-3 mb-4 flex-wrap">
+    <div class="text-sm text-ink-muted">
+      The written brief — built from the case's reports + promoted findings. Regenerate rewrites this brief with the latest findings (it replaces what's shown here). Export a copy from Deliverables to keep a snapshot.
+    </div>
+    <button @click="regen()" :disabled="busy"
+            class="shrink-0 text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+      <span x-show="!busy">{% if has_brief %}Regenerate brief{% else %}Generate brief{% endif %}</span>
+      <span x-show="busy" x-cloak>Regenerating… (LLM pass, ~30s)</span>
+    </button>
+  </div>
+  <div x-show="msg" x-cloak class="text-sm mb-4" :class="ok ? 'text-conf-high' : 'text-sev-high'" x-text="msg"></div>
+  {% endif %}
+
+  {% if stale %}
+  <div class="bg-yellow-500/10 border border-yellow-500/40 rounded-lg p-4 mb-4 flex items-start gap-3">
+    <span class="text-sev-med text-lg leading-none">⚠</span>
+    <div class="text-sm">
+      <div class="font-semibold text-sev-med">Brief is stale</div>
+      <div class="text-ink mt-0.5">
+        Built on <span class="font-mono">{{ stale.generated_for }}</span> report{{ '' if stale.generated_for == 1 else 's' }};
+        there {{ 'is' if stale.live == 1 else 'are' }} now <span class="font-mono">{{ stale.live }}</span>.
+        Hit <strong>Regenerate brief</strong> above to fold in the newer reports.
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-6">
+    <div id="brief-target" class="markdown"></div>
+  </div>
+</div>
+
+<script id="brief-md" type="text/plain">{{ content }}</script>
+<script>
+function briefActions() {
+  return {
+    busy: false, msg: '', ok: false,
+    async regen() {
+      this.busy = true; this.msg = '';
+      try {
+        const d = await fetch('/api/synthesize', { method: 'POST' }).then(r => r.json());
+        if (d.error) { this.ok = false; this.msg = d.error; this.busy = false; return; }
+        this.ok = true; this.msg = 'Brief regenerated — reloading…';
+        setTimeout(() => location.reload(), 600);
+      } catch (e) { this.ok = false; this.msg = 'Regeneration failed — try again'; this.busy = false; }
+    },
+  };
+}
+function renderMd(md) {
+  if (!md) return '';
+  let html = md;
+  html = html.replace(/```([\s\S]*?)```/g, (m, c) => `<pre class="bg-bg-soft p-3 rounded my-2 overflow-x-auto"><code>${escapeHtml(c)}</code></pre>`);
+  html = html.replace(/(?:^\|.+\|\s*\n)+/gm, (block) => {
+    const rows = block.trim().split('\n').filter(r => r.trim());
+    if (rows.length < 2) return block;
+    const cells = rows.map(r => r.split('|').slice(1, -1).map(c => c.trim()));
+    if (!cells[1].every(c => /^-+:?$/.test(c) || /^:?-+:?$/.test(c))) return block;
+    const headRow = '<tr>' + cells[0].map(c => `<th>${inlineMd(c)}</th>`).join('') + '</tr>';
+    const body = cells.slice(2).map(r => '<tr>' + r.map(c => `<td>${inlineMd(c)}</td>`).join('') + '</tr>').join('');
+    return `<table>${headRow}${body}</table>\n`;
+  });
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+  html = html.replace(/^(?:- (.+)(?:\n|$))+/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^- /, ''));
+    return '<ul>' + items.map(i => `<li>${inlineMd(i)}</li>`).join('') + '</ul>\n';
+  });
+  html = html.split('\n\n').map(p => {
+    if (/^<(h\d|ul|ol|blockquote|pre|table)/.test(p.trim())) return p;
+    if (!p.trim()) return '';
+    return `<p>${inlineMd(p)}</p>`;
+  }).join('\n');
+  return html;
+}
+function inlineMd(s) {
+  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" class="text-accent hover:underline">$1</a>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  s = s.replace(/`([^`]+?)`/g, '<code>$1</code>');
+  s = s.replace(/\[([^\]]+?)\]\(([^)]+?)\)/g, '<a href="$2" target="_blank" class="text-accent hover:underline">$1</a>');
+  return s;
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+document.getElementById('brief-target').innerHTML = renderMd(document.getElementById('brief-md').textContent);
+</script>
+{% endblock %}

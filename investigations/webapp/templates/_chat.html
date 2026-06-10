@@ -1,0 +1,687 @@
+<!-- THE chat — one box, every capability, on every page (prd-unified-chat 2026-06-08).
+     Backed by /api/chat: grounded Q&A, the investigator agent, graph control, and
+     case creation, all through one surface. Graph-canvas effects (live node/edge
+     deltas, the big run panel) are optional: when the graph page is open it registers
+     window.__kipiGraph and this chat drives the canvas through it; everywhere else the
+     same chat shows a compact run progress line instead. Replaces the old "Ask the
+     case" bubble + the graph-only chat panel. -->
+{# `docked` (set by the graph split-view include) renders the chat inline — fills its
+   container, always open, no floating bubble. Default = the corner bubble. SAME
+   caseChat() component either way: one chat, two layouts. #}
+<div x-data="caseChat({% if docked %}true{% endif %})"
+     class="{% if docked %}h-full flex flex-col bg-bg-card print:hidden{% else %}fixed bottom-4 right-4 z-[55] flex flex-col items-end print:hidden{% endif %}">
+  {% if docked %}
+  <div class="flex-1 min-h-0 w-full bg-bg-card flex flex-col">
+  {% else %}
+  <div x-show="open" x-cloak @keydown.escape="open=false"
+       class="mb-2 w-[24rem] max-w-[calc(100vw-2rem)] bg-bg-card border border-bg-border rounded-xl shadow-card flex flex-col" style="height:32rem">
+  {% endif %}
+    <div class="flex items-center justify-between px-3.5 h-11 border-b border-bg-border shrink-0">
+      <div class="text-sm font-semibold text-ink">Investigator</div>
+      {% if not docked %}<button @click="open=false" class="text-ink-muted hover:text-ink">✕</button>{% endif %}
+    </div>
+    <div x-ref="box" @click="onMsgClick($event)" class="flex-1 overflow-y-auto px-3.5 py-3 space-y-2 text-sm">
+      <div x-show="!msgs.length" class="text-ink-faint leading-relaxed">
+        Ask anything, or give a command. "who runs this domain?" answers from the case
+        with sources. "investigate trumpfundus.com" runs the agent. Click a node or edge to
+        open it here. Drive the graph: "only domains", "min score 50", "search gambler",
+        "show all". See the work: "findings" or "runs".
+      </div>
+      <template x-for="(m, i) in msgs" :key="i">
+        <div :class="m.role === 'you' ? 'text-right' : (m.role === 'aside' ? 'text-center' : '')">
+          <span x-show="m.role === 'aside'" class="inline-block text-[11px] text-ink-faint italic px-2 py-0.5"
+                x-text="'· ' + m.text + ' ·'"></span>
+          <!-- Agent replies are markdown (bold, `code`, bullet lists) — render them. -->
+          <span x-show="m.role !== 'aside' && m.role !== 'you' && m.role !== 'node' && m.role !== 'edge' && m.role !== 'runs'"
+                class="markdown inline-block rounded-lg px-3 py-2 max-w-[90%] text-left bg-bg-soft text-ink border border-bg-border"
+                x-html="md(m.text)"></span>
+          <!-- Your own messages stay literal (no surprise formatting of what you typed). -->
+          <span x-show="m.role === 'you'"
+                class="inline-block rounded-lg px-3 py-2 max-w-[90%] whitespace-pre-wrap text-left bg-accent text-white"
+                x-text="m.text"></span>
+
+          <!-- NODE CARD — clicking a node on the graph opens it HERE, not in a side panel.
+               Identity + what-we-found + the node's actions (Investigate / Enrich / dossier).
+               x-if (not x-show): the card's m.node.* bindings must NOT evaluate on a
+               non-node message, or Alpine throws on undefined m.node. -->
+          <template x-if="m.role === 'node'">
+          <div x-cloak
+               class="w-full bg-bg-card border border-bg-border rounded-lg p-3 text-left shadow-sm">
+            <div class="font-mono font-semibold text-sm text-ink break-all"
+                 x-text="m.node.full_name"></div>
+            <div class="text-[11px] text-ink-muted mt-0.5">
+              <span x-text="m.node.type"></span>
+              <template x-if="m.node.role"><span> · <span x-text="m.node.role"></span></span></template>
+              <span> · </span>
+              <span x-text="m.node.origin === 'osint' ? 'detective investigated'
+                            : m.node.origin === 'manual' ? 'added manually' : 'from intake'"></span>
+              <template x-if="m.node.report_count"><span> · <span x-text="m.node.report_count"></span> report(s)</span></template>
+            </div>
+            <div x-show="m.node.dossier" x-cloak
+                 class="markdown text-xs text-ink-muted mt-2 max-h-40 overflow-y-auto border-t border-bg-border pt-2"
+                 x-html="md(m.node.dossier)"></div>
+            <div class="flex flex-wrap items-center gap-1.5 mt-2.5">
+              <button @click="investigateNode(m.node)"
+                      class="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-hover">🔍 Investigate</button>
+              <button x-show="m.node.neighbors && m.node.neighbors.length" @click="investigateMany(m.node)"
+                      class="text-xs px-2.5 py-1 rounded border border-accent text-accent hover:bg-accent hover:text-white">+ neighbors (<span x-text="(m.node.neighbors || []).length"></span>)</button>
+              <select x-model="m.node._provider"
+                      class="text-xs bg-bg-soft border border-bg-border rounded px-1.5 py-1 max-w-[8rem]">
+                <template x-for="p in providers" :key="p.slug">
+                  <option :value="p.slug" x-text="p.display_name + (p.configured ? '' : ' (needs key)')"></option>
+                </template>
+              </select>
+              <button @click="enrichNode(m.node, m.node._provider)" :disabled="m.node._enrichBusy"
+                      class="text-xs px-2.5 py-1 rounded border border-accent text-accent hover:bg-accent hover:text-white disabled:opacity-40">
+                <span x-show="!m.node._enrichBusy">Enrich</span><span x-show="m.node._enrichBusy" x-cloak>…</span>
+              </button>
+              <a :href="'/entity/' + m.node.id"
+                 class="text-xs px-2.5 py-1 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">Open dossier →</a>
+            </div>
+            <!-- Focus the node's neighbors on the canvas (incr 2 — old panel's focus controls). -->
+            <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+              <button @click="focusNode(m.node, 'in')" class="text-[11px] px-2 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">← in (<span x-text="m.node.in_count || 0"></span>)</button>
+              <button @click="focusNode(m.node, 'out')" class="text-[11px] px-2 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">out (<span x-text="m.node.out_count || 0"></span>) →</button>
+              <button @click="focusNode(m.node, 'all')" class="text-[11px] px-2 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">both</button>
+              <button @click="graph()?.openNodeNewGraph(m.node.id)" class="text-[11px] px-2 py-0.5 rounded border border-bg-border text-ink-muted hover:text-accent hover:border-accent">↗ new graph</button>
+            </div>
+            <div x-show="m.node._enrichMsg" x-cloak class="text-[11px] text-ink-faint mt-1.5" x-text="m.node._enrichMsg"></div>
+            <!-- Enrich results: promote the ones worth keeping (+node) (incr 2). -->
+            <div x-show="m.node._enrichResults && m.node._enrichResults.length" x-cloak class="mt-1.5 space-y-1 max-h-44 overflow-y-auto">
+              <template x-for="(res, ri) in m.node._enrichResults" :key="'r'+ri">
+                <div class="text-[11px] bg-bg-soft border border-bg-border rounded p-1.5">
+                  <div class="flex items-start justify-between gap-1.5">
+                    <div class="min-w-0">
+                      <div class="font-mono text-ink truncate" x-text="res.title || res.url || 'result'"></div>
+                      <div class="text-ink-muted line-clamp-2" x-show="res.summary" x-text="res.summary"></div>
+                    </div>
+                    <button x-show="res.url && !res.promoted" @click="promoteResult(m.node, res)"
+                            class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-accent text-accent hover:bg-accent hover:text-white">+ node</button>
+                    <span x-show="res.promoted" x-cloak class="shrink-0 text-[10px] text-accent">✓ on graph</span>
+                  </div>
+                  <div x-show="res._err" x-cloak class="text-sev-high" x-text="res._err"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+          </template>
+
+          <!-- EDGE CARD — a tapped connection opens HERE, not in a side panel. x-if so
+               m.edge.* never evaluates on a non-edge message. -->
+          <template x-if="m.role === 'edge'">
+          <div x-cloak
+               class="w-full bg-bg-card border border-bg-border rounded-lg p-3 text-left shadow-sm">
+            <div class="text-[10px] uppercase tracking-wider text-ink-faint">Connection</div>
+            <div class="text-sm font-mono text-ink mt-0.5 break-words">
+              <span x-text="m.edge.src_name"></span>
+              <span class="text-accent mx-1" x-text="m.edge.co_occurrence ? '·' : '→'"></span>
+              <span x-text="m.edge.dst_name"></span>
+            </div>
+            <div class="flex flex-wrap gap-1.5 text-[11px] mt-1.5">
+              <span class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border font-mono"
+                    x-text="m.edge.co_occurrence ? 'co-occurs' : (m.edge.rel_type || 'related')"></span>
+              <span x-show="m.edge.confidence && !m.edge.co_occurrence" x-cloak
+                    class="px-1.5 py-0.5 rounded bg-bg-soft border border-bg-border" x-text="m.edge.confidence + ' confidence'"></span>
+            </div>
+            <!-- Why this edge exists: typed evidence, else shared-report context. -->
+            <div class="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+              <template x-for="(t, i) in (m.edge.typed || [])" :key="'t'+i">
+                <div class="text-[11px] bg-bg-soft border border-bg-border rounded p-1.5">
+                  <div class="font-mono text-accent" x-text="(t.dir === 'reverse' ? '← ' : '→ ') + t.rel_type + ' (' + t.confidence + ')'"></div>
+                  <div class="text-ink-muted" x-text="t.evidence || 'no recorded evidence'"></div>
+                </div>
+              </template>
+              <template x-for="(s, i) in (m.edge.shared_reports || [])" :key="'s'+i">
+                <div class="text-[11px]">
+                  <div class="text-ink-faint"><span class="font-mono" x-text="s.report"></span> · <span x-text="s.kind"></span></div>
+                  <div class="text-ink-muted bg-bg-soft border border-bg-border rounded p-1.5 whitespace-pre-wrap" x-text="s.context"></div>
+                </div>
+              </template>
+              <div x-show="!(m.edge.typed || []).length && !(m.edge.shared_reports || []).length"
+                   class="text-[11px] text-ink-faint">No recorded reason for this edge yet.</div>
+            </div>
+            <div class="mt-2.5">
+              <button @click="investigateEdgeChat(m.edge)" :disabled="m.edge._busy"
+                      class="text-xs px-2.5 py-1 rounded bg-accent/10 border border-accent/40 text-accent hover:bg-accent/20 disabled:opacity-50">
+                <span x-show="!m.edge._busy">🔎 Investigate this connection</span><span x-show="m.edge._busy" x-cloak>…</span>
+              </button>
+              <span x-show="m.edge._msg" x-cloak class="text-[11px] text-ink-faint ml-2" x-text="m.edge._msg"></span>
+            </div>
+          </div>
+          </template>
+
+          <!-- RUNS / FINDINGS card (incr 4) — type "findings" or "runs" to fold the run
+               trail + findings into the thread. x-if so m.runs.* never evaluates elsewhere. -->
+          <template x-if="m.role === 'runs'">
+          <div x-cloak class="w-full bg-bg-card border border-bg-border rounded-lg p-3 text-left shadow-sm">
+            <div class="text-[10px] uppercase tracking-wider text-ink-faint" x-text="m.mode === 'findings' ? 'Findings' : 'Run trail'"></div>
+            <div class="text-xs text-ink-muted mt-0.5"><span x-text="m.total"></span> finding(s) · <span x-text="m.runs.length"></span> run(s)</div>
+            <div class="mt-2 space-y-2 max-h-80 overflow-y-auto">
+              <template x-for="(run, ri) in m.runs" :key="'run'+ri">
+                <div class="text-[11px] border-t border-bg-border pt-1.5">
+                  <div class="font-mono text-ink truncate" x-text="run.entity_name || run.query || 'run'"></div>
+                  <template x-for="(res, fi) in (run.results || [])" :key="'f'+fi">
+                    <div class="text-ink-muted mt-0.5">
+                      • <span x-text="res.title || res.summary || 'finding'"></span>
+                      <span x-show="res.confidence" x-cloak class="text-ink-faint" x-text="'(' + res.confidence + ')'"></span>
+                    </div>
+                  </template>
+                  <div x-show="!(run.results || []).length" class="text-ink-faint">no promoted findings</div>
+                  <!-- Trail mode: the agent's real steps + what it ruled out. -->
+                  <template x-if="m.mode !== 'findings' && run.process">
+                    <div class="mt-1">
+                      <template x-for="(s, si) in ((run.process.steps || []).slice(0, 10))" :key="'s'+si">
+                        <div class="text-ink-faint truncate" x-text="'› ' + (s.tool || s.type || 'step') + (s.input ? (' ' + (typeof s.input === 'string' ? s.input : JSON.stringify(s.input))) : '')"></div>
+                      </template>
+                      <template x-for="(n, ni) in (run.process.negatives || [])" :key="'n'+ni">
+                        <div class="text-ink-faint truncate">✕ ruled out: <span x-text="n.checked"></span></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <div x-show="!m.runs.length" class="text-[11px] text-ink-faint">No runs yet — investigate a node to start.</div>
+            </div>
+          </div>
+          </template>
+
+          <div x-show="m.sources && m.sources.length" x-cloak class="text-[10px] text-ink-faint mt-1"
+               x-text="'grounded · ' + (m.sources ? m.sources.length : 0) + ' source(s)'"></div>
+        </div>
+      </template>
+      <div x-show="invMsg" x-cloak class="text-[11px] text-ink-faint" x-text="'· ' + invMsg"></div>
+      <!-- Live step trail (live-run-visibility): every move the run makes, accumulating,
+           with its input + result as they stream + the entities each step discovered.
+           Replaces the single bare tool line (which stays below as the compact summary). -->
+      <div x-show="liveSteps.length" x-cloak
+           class="border border-bg-border rounded-lg bg-bg-soft/50 p-2 space-y-1 max-h-56 overflow-y-auto text-[11px]">
+        <template x-for="s in liveSteps" :key="s.seq">
+          <div>
+            <template x-if="s.type === 'reasoning'">
+              <div class="text-ink-muted italic" x-text="s.text"></div>
+            </template>
+            <template x-if="s.type === 'redirect'">
+              <div class="text-accent">↳ redirect: <span x-text="s.text"></span></div>
+            </template>
+            <template x-if="s.type !== 'reasoning' && s.type !== 'redirect'">
+              <div>
+                <div class="text-ink">
+                  <span class="font-mono text-accent" x-text="s.tool || 'tool'"></span><span
+                        class="text-ink-muted" x-show="s.input" x-text="' ' + s.input"></span>
+                </div>
+                <div x-show="s.result" x-cloak class="text-ink-faint truncate pl-2" x-text="'→ ' + s.result"></div>
+                <div x-show="s.entities && s.entities.length" x-cloak class="flex flex-wrap gap-1 pl-2 mt-0.5">
+                  <template x-for="(en, ei) in s.entities" :key="ei">
+                    <span class="px-1 py-0.5 rounded bg-bg-card border border-bg-border text-[10px] font-mono"
+                          x-text="en.value"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+      <div x-show="busy" x-cloak class="flex items-center justify-between gap-2 text-xs text-ink-faint">
+        <span x-text="step ? ('· ' + step) : 'thinking…'" class="truncate"></span>
+        <button x-show="jobActive" @click="stop()"
+                class="shrink-0 text-[11px] px-2 py-0.5 rounded border border-bg-border text-ink hover:bg-bg-soft">Stop</button>
+      </div>
+      <form x-show="jobActive" x-cloak @submit.prevent="redirect()" class="flex gap-1.5">
+        <input x-model="redirectMsg" placeholder="steer it mid-run…"
+               class="flex-1 min-w-0 bg-bg-soft border border-bg-border rounded px-2 py-1 text-[11px]">
+        <button type="submit" :disabled="!redirectMsg.trim()"
+                class="shrink-0 text-[11px] px-2 py-0.5 rounded border border-accent text-accent hover:bg-accent hover:text-white disabled:opacity-40">Redirect</button>
+      </form>
+      <div x-show="lastHidden" x-cloak class="text-xs">
+        <button @click="undoHide()" class="text-accent hover:underline">↺ Undo hide (<span x-text="lastHidden?.name"></span>)</button>
+      </div>
+    </div>
+    <form @submit.prevent="send()" class="p-2.5 border-t border-bg-border shrink-0 flex gap-1.5">
+      <input x-model="input" :disabled="busy" placeholder="ask or command…"
+             class="flex-1 min-w-0 bg-bg-soft border border-bg-border rounded px-2.5 py-1.5 text-sm focus:border-accent outline-none">
+      <button type="submit" :disabled="busy || !input.trim()"
+              class="shrink-0 text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">Send</button>
+    </form>
+  </div>
+  {% if not docked %}
+  <button @click="toggle()" :title="open?'Close':'Investigator'"
+          class="w-12 h-12 rounded-full bg-accent text-white shadow-lg flex items-center justify-center hover:bg-accent-hover">
+    <span x-show="!open" class="text-xl">💬</span>
+    <span x-show="open" x-cloak class="text-xl leading-none">✕</span>
+  </button>
+  {% endif %}
+</div>
+<script>
+function caseChat(docked) {
+  return {
+    docked: !!docked, open: !!docked, loaded: false,
+    input: '', busy: false, msgs: [], step: '',
+    jobActive: false, redirectMsg: '', liveSteps: [],
+    invMsg: '', invTimer: null,
+    lastHidden: null,
+    providers: [],          // enrich providers for the node card's Enrich dropdown
+
+    // Docked (graph split-view) is always open with no bubble to toggle, so load the
+    // transcript at init instead of on first toggle. Register __kipiChat so the graph
+    // canvas opens a tapped node HERE (a node card) instead of a side panel.
+    init() {
+      if (this.docked) { this.loadTranscript(); this.loadProviders(); }
+      window.__kipiChat = { showNode: (d) => this.showNode(d), showEdge: (d) => this.showEdge(d) };
+      window.addEventListener('beforeunload', () => { window.__kipiChat = null; });
+      this.reconnectRunningJob();   // re-attach to an in-flight warm run after reload / nav
+    },
+
+    // If a warm investigation is already running for this case (the analyst reloaded or
+    // switched pages mid-run), re-attach to its live step trail so progress isn't blanked.
+    // streamJob() reconnects to the SSE stream; on any miss it falls back to status polling,
+    // which reads the same server-side step trail — either way the ticker comes back.
+    async reconnectRunningJob() {
+      try {
+        const s = await fetch('/api/chat/status').then(x => x.json());
+        if (s && s.status === 'running' && !this.jobActive) {
+          if (!this.loaded) this.loadTranscript();
+          this.busy = true;
+          this.pollJob();
+        }
+      } catch (_) { /* best-effort: a fresh chat still works without reconnect */ }
+    },
+
+    async loadProviders() {
+      if (this.providers.length) return;
+      try {
+        const d = await fetch('/api/enrich/providers').then(r => r.json());
+        this.providers = (d.providers || []).sort((a, b) => (b.configured) - (a.configured));
+      } catch (e) {}
+    },
+
+    // The graph hands a tapped node here. Render it as a card in the thread (one surface).
+    showNode(data) {
+      if (!data || !data.full_name) return;
+      if (!this.providers.length) this.loadProviders();
+      const prov = (this.providers.find(p => p.configured) || this.providers[0] || {}).slug || '';
+      // One CURRENT-node card: clicking a different node CHANGES the card in place rather
+      // than stacking a new one. Action results (investigate/enrich) still post separately.
+      this.msgs = this.msgs.filter(m => m.role !== 'node');
+      this.msgs.push({ role: 'node', node: { ...data, _provider: prov, _enrichBusy: false, _enrichMsg: '', _enrichResults: [] } });
+      this.scroll();
+    },
+
+    // Node card → focus the node's neighbors on the canvas ('in' | 'out' | 'all').
+    focusNode(node, dir) {
+      const g = this.graph();
+      if (g && g.focusDirection) g.focusDirection(node.id, dir);
+    },
+
+    // Node card → promote ONE enrich result into a graph node (+ edge to the source).
+    async promoteResult(node, res) {
+      try {
+        const p = await fetch('/api/enrich/result/' + res.id + '/promote', { method: 'POST' })
+          .then(r => r.json());
+        if (!p.error || p.added_to_dossier) {
+          res.promoted = true;
+          const g = this.graph(); if (g && g.reload) g.reload();
+        } else { res._err = p.error; }
+      } catch (e) { res._err = 'failed'; }
+    },
+
+    // The graph hands a tapped edge here. One current-edge card (replace in place).
+    showEdge(data) {
+      if (!data) return;
+      this.msgs = this.msgs.filter(m => m.role !== 'edge');
+      this.msgs.push({ role: 'edge', edge: { ...data, _busy: false, _msg: '' } });
+      this.scroll();
+    },
+
+    // Edge card → Investigate the relationship; progress streamed into THIS chat.
+    async investigateEdgeChat(edge) {
+      edge._busy = true; edge._msg = 'starting…';
+      try {
+        const d = await fetch('/api/investigate/edge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ src: edge.src_id, dst: edge.dst_id }),
+        }).then(r => r.json());
+        if (d.error) { edge._msg = d.error; return; }
+        edge._msg = d.status === 'running' ? 'a run is already in progress' : 'investigating…';
+        this.watchRunCompact();
+      } catch (e) { edge._msg = 'could not start'; }
+      finally { edge._busy = false; }
+    },
+
+    // Node card → investigate the node AND its neighbors as one batch (the old
+    // "select neighborhood → investigate all"). Server caps the set.
+    async investigateMany(node) {
+      const list = [...new Set([node.full_name, ...(node.neighbors || [])].filter(Boolean))];
+      if (list.length < 2) { return this.investigateNode(node); }
+      this.msgs.push({ role: 'you', text: 'Investigate ' + node.full_name + ' + ' + (list.length - 1) + ' neighbors' });
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entities: list }),
+        }).then(r => r.json());
+        if (d.error) { this.msgs.push({ role: 'agent', text: d.error }); return; }
+      } catch (e) { this.msgs.push({ role: 'agent', text: 'Could not start.' }); return; }
+      this.watchRunCompact();
+    },
+
+    // Typed graph commands (incr 3): filter / search / show-all drive the canvas via the
+    // graph hooks. Returns true if it handled the text (so send() skips the agent).
+    tryGraphCommand(raw) {
+      const g = this.graph();
+      if (!g) return false;
+      const t = raw.trim().toLowerCase();
+      if (/^(show (all|everything)|reset( filters?)?|clear filters?)$/.test(t)) {
+        if (g.showAll) g.showAll(); this.msgs.push({ role: 'aside', text: 'showing everything' }); return true;
+      }
+      let m = t.match(/^(?:search|find|highlight)\s+(.+)$/);
+      if (m) { if (g.searchGraph) g.searchGraph(m[1]); this.msgs.push({ role: 'aside', text: 'searching "' + m[1] + '"' }); return true; }
+      m = t.match(/^(?:min(?:imum)?\s+score|score)\s*(?:>=?|over|above)?\s*(\d+)$/);
+      if (m) { if (g.applyFilter) g.applyFilter({ minScore: Math.min(100, parseInt(m[1], 10)) }); this.msgs.push({ role: 'aside', text: 'min score ≥ ' + m[1] }); return true; }
+      const TYPES = { domain:'domain', domains:'domain', ip:'ip', ips:'ip', email:'email', emails:'email',
+        wallet:'crypto_wallet', wallets:'crypto_wallet', org:'organization', orgs:'organization',
+        organization:'organization', organizations:'organization', person:'person', people:'person',
+        persons:'person', handle:'handle', handles:'handle', url:'url', urls:'url' };
+      m = t.match(/^(?:only |show |filter (?:to |by )?)?([a-z]+)s?$/);
+      if (m && (TYPES[m[1]] || TYPES[m[1] + 's'])) {
+        if (g.applyFilter) g.applyFilter({ etype: TYPES[m[1]] || TYPES[m[1] + 's'] });
+        this.msgs.push({ role: 'aside', text: 'only ' + m[1] }); return true;
+      }
+      return false;
+    },
+
+    // Typed runs/findings commands (incr 4): fold the run trail + findings into the thread.
+    async tryRunsCommand(raw) {
+      const t = raw.trim().toLowerCase();
+      if (!/^(show\s+)?(findings?|runs?|run\s*trail|trail)$/.test(t)) return false;
+      try {
+        const d = await fetch('/api/findings').then(r => r.json());
+        this.msgs = this.msgs.filter(m => m.role !== 'runs');
+        this.msgs.push({ role: 'runs', runs: d.runs || [], total: d.finding_count || 0,
+                         mode: /find/.test(t) ? 'findings' : 'trail' });
+        this.scroll();
+      } catch (e) { this.msgs.push({ role: 'agent', text: 'could not load runs' }); }
+      return true;
+    },
+
+    // Node card → Investigate: the one-hop quick run, progress streamed into THIS chat.
+    async investigateNode(node) {
+      this.msgs.push({ role: 'you', text: 'Investigate ' + node.full_name });
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity: node.full_name }),
+        }).then(r => r.json());
+        if (d.error) { this.msgs.push({ role: 'agent', text: d.error }); return; }
+      } catch (e) { this.msgs.push({ role: 'agent', text: 'Could not start.' }); return; }
+      this.watchRunCompact();
+    },
+
+    // Node card → Enrich: run ONE provider, list the results so the analyst promotes the
+    // ones they want (+node) — same control the old side panel had.
+    async enrichNode(node, provider) {
+      if (!provider) { node._enrichMsg = 'pick a provider first'; return; }
+      node._enrichBusy = true; node._enrichMsg = 'running ' + provider + '…'; node._enrichResults = [];
+      try {
+        const d = await fetch('/api/enrich/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, query: node.full_name, entity_id: node.id }),
+        }).then(r => r.json());
+        if (d.error || d.status === 'error') { node._enrichMsg = d.error || 'enrich failed'; return; }
+        const run = await fetch('/api/enrich/run/' + d.run_id).then(r => r.json()).catch(() => null);
+        node._enrichResults = ((run && run.results) || []).map(x => ({
+          id: x.id, title: x.title, summary: x.summary, url: x.url,
+          promoted: !!x.extracted_entity_id, _err: '',
+        }));
+        node._enrichMsg = node._enrichResults.length
+          ? (node._enrichResults.length + ' result(s) — +node to add to the graph')
+          : 'no results';
+      } catch (e) { node._enrichMsg = 'enrich failed'; }
+      finally { node._enrichBusy = false; }
+    },
+
+    // Render an agent reply's markdown to safe HTML: escape first (XSS-safe), then
+    // inline `code`, **bold**, bullet lists, and paragraphs. Matches the .markdown CSS
+    // in _layout. Citations like [27] are left as-is (they mark grounded sources).
+    md(text) {
+      if (!text) return '';
+      let h = String(text).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+      h = h.replace(/\s*\[\d+\]/g, '');                       // drop [27]-style citation markers
+      // `code` and **bold** are the agent's node names → tag them clickable (.chat-node).
+      h = h.replace(/`([^`]+)`/g, '<code class="chat-node">$1</code>');
+      h = h.replace(/\*\*(.+?)\*\*/g, '<strong class="chat-node">$1</strong>');
+      h = h.replace(/(?:^[-*] .+(?:\n|$))+/gm, b =>
+        '<ul>' + b.trim().split('\n').map(l => `<li>${l.replace(/^[-*] /, '')}</li>`).join('') + '</ul>');
+      h = h.split(/\n{2,}/).map(p =>
+        /^<(ul|ol|h\d|blockquote)/.test(p.trim()) ? p : (p.trim() ? `<p>${p.replace(/\n/g, '<br>')}</p>` : '')
+      ).join('');
+      return h;
+    },
+
+    // Click a node name in a reply → spotlight that node on the graph canvas. Only does
+    // something on the graph page (where window.__kipiGraph exists); a non-node name or
+    // any other page is a harmless no-op.
+    onMsgClick(e) {
+      const el = e.target.closest('.chat-node');
+      if (!el) return;
+      const g = this.graph();
+      if (g && g.highlightByName) g.highlightByName(el.textContent.trim());
+    },
+
+    // The graph page registers window.__kipiGraph so this chat can drive the canvas.
+    // Everywhere else it's null and graph effects are skipped (server still persists).
+    graph() { return window.__kipiGraph || null; },
+
+    toggle() { this.open = !this.open; if (this.open && !this.loaded) this.loadTranscript(); },
+
+    async loadTranscript() {
+      this.loaded = true;
+      try {
+        const rows = await fetch('/api/chat/transcript').then(x => x.json());
+        if (Array.isArray(rows) && rows.length) {
+          this.msgs = rows.map(t => ({
+            role: t.role === 'analyst' ? 'you' : (t.role === 'ui_event' ? 'aside' : 'agent'),
+            text: t.text,
+          }));
+          this.scroll();
+        }
+      } catch (e) { /* transcript is best-effort; an empty chat still works */ }
+    },
+
+    scroll() { this.$nextTick(() => { const b = this.$refs.box; if (b) b.scrollTop = b.scrollHeight; }); },
+
+    async send() {
+      const msg = this.input.trim();
+      if (!msg || this.busy) return;
+      // Local graph commands first (incr 3/4) — filter/search/runs are handled in-page
+      // (drive the canvas / load runs) with no round-trip to the agent.
+      if (this.tryGraphCommand(msg)) { this.input = ''; return; }
+      if (await this.tryRunsCommand(msg)) { this.input = ''; return; }
+      this.msgs.push({ role: 'you', text: msg });
+      this.input = ''; this.busy = true; this.step = '';
+      this.scroll();
+      const g = this.graph();
+      try {
+        const selections = (g && g.takeSelections) ? g.takeSelections() : [];
+        const selected_name = (g && g.selectedName) ? g.selectedName() : null;
+        const r = await fetch('/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg, selected_name, selections }),
+        }).then(x => x.json());
+        if (r.mode === 'job') { await this.pollJob(); return; }
+        // synchronous path: grounded answer / router reply / action
+        this.msgs.push({ role: 'agent', text: r.reply || '(no reply)', sources: r.sources || [] });
+        if (g && g.applyDeltas) g.applyDeltas(r.deltas);
+        if (r.deltas && r.deltas.undo) this.lastHidden = r.deltas.undo;
+        if (r.action && r.action.type === 'new_case') {
+          // Warm run → the docked chat on /graph reconnects to the live trail itself
+          // (reconnectRunningJob); only the old run-panel job needs watch=1.
+          window.location.href = '/graph' + (r.action.ran && !r.action.warm ? '?watch=1' : '');
+          return;
+        }
+        if (r.action && r.action.type === 'investigate') this.startInvestigation(r.action);
+      } catch (e) {
+        this.msgs.push({ role: 'agent', text: 'Could not reach the investigator.' });
+      } finally {
+        if (!this.jobActive) this.busy = false;
+        this.scroll();
+      }
+    },
+
+    // Live step trail (live-run-visibility): upsert by seq so a result-fill re-emit
+    // updates the row in place instead of duplicating it.
+    upsertStep(s) {
+      if (!s || !s.seq) return;
+      const i = this.liveSteps.findIndex(x => x.seq === s.seq);
+      if (i >= 0) this.liveSteps[i] = s; else this.liveSteps.push(s);
+      this.scroll();
+    },
+
+    // Compact one-line summary of a step for the busy line (tool + what it acted on).
+    stepLine(s) {
+      const head = s.tool || s.type || 'step';
+      const arg = s.input ? (' ' + s.input) : (s.text ? (': ' + s.text.slice(0, 80)) : '');
+      return (head + arg).slice(0, 120);
+    },
+
+    // Drop server-extracted entities onto the graph as provisional "discovered" nodes.
+    // Graph page only (window.__kipiGraph present); elsewhere a harmless no-op. reload()
+    // at turn end rebuilds from the DB, replacing these with whatever actually landed.
+    discover(s) {
+      const g = this.graph();
+      if (!g || !g.addProvisional || !s.discovery) return;
+      const d = s.discovery;
+      if (d.anchor || (d.found && d.found.length)) g.addProvisional(d);
+    },
+
+    // Warm turn → stream the live step trail over SSE; fall back to status polling.
+    async pollJob() {
+      this.jobActive = true;
+      this.liveSteps = [];
+      const g0 = this.graph(); if (g0 && g0.setRunning) g0.setRunning(true);
+      try {
+        try { await this.streamJob(); }
+        catch (_) { await this.pollStatusLoop(); }
+      } catch (e) {
+        this.msgs.push({ role: 'agent', text: 'Lost contact with the run.' });
+      } finally {
+        this.jobActive = false; this.busy = false; this.step = '';
+        const g1 = this.graph(); if (g1 && g1.setRunning) g1.setRunning(false);
+        this.scroll();
+      }
+    },
+
+    streamJob() {
+      return new Promise((resolve, reject) => {
+        let settled = false, sawDone = false;
+        const es = new EventSource('/api/chat/stream');
+        es.addEventListener('step', (e) => {
+          try { const s = JSON.parse(e.data);
+            this.upsertStep(s);
+            this.step = this.stepLine(s);
+            this.discover(s);
+          } catch (_) {}
+        });
+        es.addEventListener('done', (e) => {
+          sawDone = true;
+          let s = {}; try { s = JSON.parse(e.data); } catch (_) {}
+          if (s.status && s.status !== 'idle')
+            this.msgs.push({ role: 'agent', text: s.reply || '(no reply)' });
+          const g = this.graph();
+          if (s.graph_touched && g && g.reload) g.reload();
+          es.close();
+          if (!settled) { settled = true; resolve(); }
+        });
+        es.onerror = () => {
+          es.close();
+          if (settled) return;
+          settled = true;
+          if (sawDone) resolve(); else reject(new Error('sse error'));
+        };
+      });
+    },
+
+    async pollStatusLoop() {
+      while (true) {
+        await new Promise(r => setTimeout(r, 1000));
+        const s = await fetch('/api/chat/status').then(x => x.json());
+        const steps = s.steps || [];
+        for (const st of steps) { this.upsertStep(st); this.discover(st); }
+        if (steps.length) {
+          this.step = this.stepLine(steps[steps.length - 1]);
+        }
+        if (s.status === 'running') continue;
+        this.msgs.push({ role: 'agent', text: s.reply || '(no reply)' });
+        const g = this.graph();
+        if (s.graph_touched && g && g.reload) g.reload();
+        break;
+      }
+    },
+
+    async stop() {
+      try { await fetch('/api/chat/stop', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+    },
+
+    async redirect() {
+      const msg = this.redirectMsg.trim();
+      if (!msg || !this.jobActive) return;
+      this.redirectMsg = '';
+      this.msgs.push({ role: 'aside', text: 'redirect: ' + msg });
+      this.scroll();
+      try {
+        await fetch('/api/chat/redirect', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        });
+      } catch (e) { /* the run stays live regardless */ }
+    },
+
+    // Launch the investigator from chat. On the graph page the rich run panel takes over
+    // (via the hook); elsewhere we show a compact progress line right here.
+    async startInvestigation(action) {
+      const g = this.graph();
+      if (g && g.startInvestigation) { g.startInvestigation(action); return; }
+      this.invMsg = 'starting…';
+      const body = action.scope === 'case' ? { deep: !!action.deep }
+                                           : { entity: action.entity, deep: !!action.deep };
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(r => r.json());
+        if (d.error) { this.msgs.push({ role: 'agent', text: d.error }); this.invMsg = ''; return; }
+      } catch (e) { this.invMsg = ''; this.msgs.push({ role: 'agent', text: 'Could not start.' }); return; }
+      this.watchRunCompact();
+    },
+
+    watchRunCompact() {
+      if (this.invTimer) return;
+      this.invTimer = setInterval(async () => {
+        let s;
+        try { s = await fetch('/api/investigate/status').then(r => r.json()); }
+        catch (e) { return; }
+        if (s.progress) {
+          const p = s.progress;
+          this.invMsg = p.targets_total
+            ? (p.targets_done + '/' + p.targets_total + ' targets · ' + p.findings + ' findings')
+            : ((p.phase || 'investigating') + '… ' + (p.findings || 0) + ' findings');
+        }
+        if (s.status === 'running') return;
+        clearInterval(this.invTimer); this.invTimer = null;
+        const note = s.status === 'no_work' ? ((s.result && s.result.note) || 'the agent ran no tools — check OSINT/MCP setup')
+                   : s.status === 'stopped' ? 'stopped — kept what was found'
+                   : 'done — open the graph to see what landed';
+        this.msgs.push({ role: 'agent', text: 'Investigation ' + note + '.' });
+        this.invMsg = ''; this.scroll();
+      }, 2000);
+    },
+
+    async undoHide() {
+      if (!this.lastHidden) return;
+      try { await fetch('/api/node/' + this.lastHidden.id + '/unhide', { method: 'POST' }); } catch (e) {}
+      this.msgs.push({ role: 'agent', text: 'Restored ' + this.lastHidden.name + '.' });
+      const g = this.graph(); if (g && g.reload) g.reload();
+      this.lastHidden = null;
+    },
+  };
+}
+</script>

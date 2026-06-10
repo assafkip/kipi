@@ -1,0 +1,54 @@
+{# Signals inbox tab switcher. Alerts / Changes / Activity were three separate
+   sidebar links; they're now one inbox surface, tabbed like _entity_views.html.
+   Live counts come from nav (open_alerts + open_corrections), already computed
+   in _tpl — Activity is a feed, so it carries no count. #}
+{% set p = request.url.path if request else '/alerts' %}
+{# 'Since you last looked' delta — per-analyst, per-scope. Empty on first visit;
+   a quiet 'caught up' line on a return with nothing new; the strip when there is. #}
+{% if signals_delta %}
+  {% set d = signals_delta %}
+  {% if d.first_visit %}
+    <div class="text-xs text-ink-faint mb-3">Tracking starts now. Your next visit shows what changed since this one.</div>
+  {% elif d.total == 0 %}
+    <div class="text-xs text-ink-faint mb-3">✓ Caught up. Nothing new since <span class="font-mono">{{ d.since }}</span> UTC.</div>
+  {% else %}
+    <div class="rail rail-elev bg-bg-card border border-bg-border rounded-lg p-3 mb-4">
+      <div class="flex items-baseline gap-2 mb-2">
+        <span class="text-sm font-medium text-ink">Since you last looked</span>
+        <span class="text-xs text-ink-faint font-mono">{{ d.since }} UTC</span>
+      </div>
+      <div class="flex items-center gap-4 text-sm flex-wrap {% if d.alerts or d.activity %}mb-2{% endif %}">
+        {% if d.alert_count %}<a href="/alerts" class="font-medium text-sev-high hover:underline num">{{ d.alert_count }}</a><span class="-ml-3 text-ink">new alert{{ '' if d.alert_count == 1 else 's' }}</span>{% endif %}
+        {% if d.corrections %}<a href="/corrections" class="font-medium text-sev-med hover:underline num">{{ d.corrections }}</a><span class="-ml-3 text-ink">new change{{ '' if d.corrections == 1 else 's' }}</span>{% endif %}
+        {% if d.activity_count %}<a href="/activity" class="font-medium text-accent hover:underline num">{{ d.activity_count }}</a><span class="-ml-3 text-ink">action{{ '' if d.activity_count == 1 else 's' }} by others</span>{% endif %}
+      </div>
+      {% for a in d.alerts %}
+      <div class="text-xs text-ink-muted truncate">
+        <span class="text-sev-high">▸</span>
+        <a href="/entity/{{ a.entity_id }}" class="font-mono hover:text-accent">{{ a.canonical_name }}</a>
+        — {{ a.message }}
+      </div>
+      {% endfor %}
+      {% for a in d.activity %}
+      <div class="text-xs text-ink-muted truncate">
+        <span class="text-accent font-mono">{{ a.analyst }}</span> {{ a.action }}{% if a.canonical_name %} <span class="font-mono text-ink">{{ a.canonical_name }}</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endif %}
+<div class="flex items-center gap-1 mb-4 border-b border-bg-border">
+  {% set tabs = [
+    ('/alerts', 'Alerts', (nav.open_alerts if nav else 0), 'bg-sev-high'),
+    ('/corrections', 'Changes', (nav.open_corrections if nav else 0), 'bg-sev-med'),
+    ('/activity', 'Activity', 0, '')
+  ] %}
+  {% for href, label, badge, badge_class in tabs %}
+  {% set active = p.startswith(href) %}
+  <a href="{{ href }}"
+     class="flex items-center gap-1.5 px-3 py-2 text-sm border-b-2 -mb-px {{ 'border-accent text-accent font-medium' if active else 'border-transparent text-ink-muted hover:text-ink' }}">
+    <span>{{ label }}</span>
+    {% if badge and badge > 0 %}<span class="text-[10px] {{ badge_class }} text-white rounded-full px-1.5 font-semibold leading-4 num">{{ badge }}</span>{% endif %}
+  </a>
+  {% endfor %}
+</div>

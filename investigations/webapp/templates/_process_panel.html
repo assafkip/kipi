@@ -1,0 +1,159 @@
+{% if nav and nav.active_case %}
+<!-- Process control. The job runs SERVER-SIDE; this panel polls status, so
+     switching tabs or navigating away never kills it. On load it resumes the
+     live state if a job is already running, and shows a live step log + bar so
+     the analyst sees what's actually running (not a blind spinner). -->
+{% set processed = nav.next_action and nav.next_action.key == 'investigate' %}
+<div x-data="processPanel('{{ nav.active_case }}', {{ 'true' if processed else 'false' }})" x-init="init()"
+     class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4">
+  <div class="flex items-center justify-between gap-3">
+    <div class="min-w-0">
+      {% if processed %}
+      <div class="text-sm font-medium"><span class="text-conf-high">✓ Case processed</span> · <span class="font-mono text-accent">{{ nav.active_case }}</span></div>
+      {% else %}
+      <div class="text-sm font-medium text-ink">Process <span class="font-mono text-accent">{{ nav.active_case }}</span></div>
+      {% endif %}
+      <div class="text-xs text-ink-muted" x-text="hint"></div>
+    </div>
+    <div class="shrink-0 flex items-center gap-2">
+      {% if processed %}
+      <!-- Processed: re-process is now the secondary action; the investigator is the
+           primary next move, sitting right here instead of only in the top strip. -->
+      <button :disabled="busy" @click="start()"
+              class="text-sm px-3 py-2 border border-bg-border rounded hover:bg-bg-soft disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-show="!busy">Re-process</span>
+        <span x-show="busy" x-cloak x-text="label"></span>
+      </button>
+      <a href="/runs?run=1"
+         class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover whitespace-nowrap">
+        Run investigator →
+      </a>
+      {% else %}
+      <button :disabled="busy" @click="start()"
+              class="text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-show="!busy">Process case</span>
+        <span x-show="busy" x-cloak x-text="label"></span>
+      </button>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Live progress: bar + per-step log. Shown whenever we have a step plan. -->
+  <div x-show="progress && progress.steps && progress.steps.length" x-cloak class="mt-3">
+    <div class="flex items-center justify-between text-xs text-ink-muted mb-1">
+      <span x-text="(busy ? 'Running' : 'Last run') + ' · ' + doneCount() + '/' + (progress ? progress.total : 0) + ' steps'"></span>
+      <span class="num" x-text="pct() + '%'"></span>
+    </div>
+    <div class="h-1.5 w-full bg-bg-soft rounded-full overflow-hidden">
+      <div class="h-full bg-accent transition-all duration-500" :style="'width:' + pct() + '%'"></div>
+    </div>
+    <ul class="mt-3 space-y-1.5">
+      <template x-for="s in (progress ? progress.steps : [])" :key="s.key">
+        <li class="flex items-center gap-2 text-sm">
+          <span class="w-4 text-center shrink-0"
+                :class="{
+                  'text-conf-high': s.status === 'ok',
+                  'text-sev-med': s.status === 'skipped',
+                  'text-accent': s.status === 'running',
+                  'text-ink-faint': s.status === 'pending'
+                }"
+                x-text="s.status === 'ok' ? '✓' : (s.status === 'skipped' ? '⊘' : (s.status === 'running' ? '◐' : '○'))"></span>
+          <span :class="{
+                  'text-ink': s.status === 'running' || s.status === 'ok',
+                  'text-ink-muted': s.status === 'pending',
+                  'text-sev-med': s.status === 'skipped'
+                }" x-text="s.label"></span>
+          <span x-show="s.status === 'running'" x-cloak class="text-xs text-accent"
+                x-text="(progress && progress.substep && progress.substep.total) ? (progress.substep.done + '/' + progress.substep.total + (progress.substep.label ? ' ' + progress.substep.label : '')) : '…running'"></span>
+        </li>
+      </template>
+    </ul>
+
+    <!-- Live log tail: the raw 'what is the agent doing right now' window. Streams
+         the pipeline's stdout (batch counters, cluster results, recovered entities).
+         Auto-scrolls to the newest line while running. -->
+    <div x-show="logLines.length" x-cloak class="mt-3">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-xs text-ink-muted">Live activity</span>
+        <span class="text-xs text-ink-faint" x-show="busy">streaming…</span>
+      </div>
+      <div x-ref="logbox"
+           class="h-40 overflow-auto rounded border border-bg-border bg-bg-soft px-3 py-2 font-mono text-xs leading-relaxed text-ink-muted whitespace-pre-wrap">
+        <template x-for="(line, i) in logLines" :key="i">
+          <div x-text="line"></div>
+        </template>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+function processPanel(caseSlug, processed) {
+  return {
+    caseSlug, processed, busy: false, label: 'Processing…', timer: null, progress: null,
+    logLines: [],
+    hint: processed
+      ? 'Entities classified and the brief is written. Send the investigator to dig the case end-to-end, then review + promote what it finds.'
+      : 'Models the case, classifies + dedupes entities (drops noise), recovers missed ones, scores + clusters, builds the graph + brief. Runs in the background — switch tabs freely.',
+    init() { this.check(); },
+    doneCount() {
+      if (!this.progress || !this.progress.steps) return 0;
+      return this.progress.steps.filter(s => s.status === 'ok' || s.status === 'skipped').length;
+    },
+    pct() {
+      const t = this.progress && this.progress.total ? this.progress.total : 0;
+      if (!t) return 0;
+      let done = this.doneCount();
+      // If the current step reports sub-progress (e.g. classify batches), add its
+      // fraction so the bar crawls forward instead of freezing on a long step.
+      const sub = this.progress.substep;
+      if (sub && sub.total > 0 && sub.done < sub.total) {
+        done += sub.done / sub.total;
+      }
+      return Math.round((done / t) * 100);
+    },
+    apply(d) {
+      if (d && d.progress) this.progress = d.progress;
+      if (d && Array.isArray(d.log)) {
+        const grew = d.log.length !== this.logLines.length;
+        this.logLines = d.log;
+        // Auto-scroll to the newest line as activity streams in.
+        if (grew) this.$nextTick(() => {
+          const box = this.$refs.logbox;
+          if (box) box.scrollTop = box.scrollHeight;
+        });
+      }
+    },
+    async check() {
+      try {
+        const d = await fetch('/api/process/status').then(r => r.json());
+        this.apply(d);
+        if (d.status === 'running') { this.busy = true; this.poll(); }
+      } catch (e) {}
+    },
+    async start() {
+      this.busy = true; this.label = 'Starting…'; this.progress = null; this.logLines = [];
+      try {
+        const d = await fetch('/api/process', { method: 'POST' }).then(r => r.json());
+        if (d.error) { this.hint = d.error; this.busy = false; return; }
+        // Schema is auto-modeled inside Process now — no approval bounce.
+        this.poll();
+      } catch (e) { this.hint = 'Failed to start — try again'; this.busy = false; }
+    },
+    poll() {
+      if (this.timer) return;
+      this.label = 'Processing… (safe to switch tabs)';
+      this.timer = setInterval(async () => {
+        let d;
+        try { d = await fetch('/api/process/status').then(r => r.json()); }
+        catch (e) { return; }
+        this.apply(d);
+        if (d.status === 'running') return;
+        clearInterval(this.timer); this.timer = null; this.busy = false;
+        if (d.status === 'error') { this.hint = (d.result && d.result.error) || 'Processing failed'; }
+        else { this.label = 'Done'; location.reload(); }
+      }, 2000);
+    },
+  };
+}
+</script>
+{% endif %}

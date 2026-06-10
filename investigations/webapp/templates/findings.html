@@ -1,0 +1,100 @@
+{% extends "_layout.html" %}
+{% block title %}Findings · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto" x-data="findingsView()"
+     x-init="if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (!document.querySelector(':focus')) location.reload(); })">
+
+  <div class="flex items-start justify-between gap-3 mb-4">
+    <div class="min-w-0">
+      <h1 class="font-display text-xl font-semibold text-ink">Investigation findings</h1>
+      <p class="text-sm text-ink-muted mt-0.5">
+        Everything the autonomous investigator turned up across this case. Findings are gated — promote the ones you trust and they become graph nodes.
+      </p>
+    </div>
+    <div class="shrink-0 text-right">
+      <div class="text-2xl font-semibold text-ink num">{{ finding_count }}</div>
+      <div class="text-xs text-ink-faint">findings · {{ runs|length }} run{{ '' if runs|length == 1 else 's' }}</div>
+    </div>
+  </div>
+
+  {% if not runs %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-6 text-sm text-ink-muted">
+    No agent investigations in scope yet. Open an entity and hit <strong>🔍 Investigate</strong>, or run a whole-case swarm. Results land here.
+  </div>
+  {% else %}
+  <div class="space-y-4">
+    {% for run in runs %}
+    <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden" x-data="{ open: false }">
+      <!-- Run header -->
+      <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-bg-border bg-bg-soft">
+        <div class="min-w-0">
+          <a href="/entity/{{ run.entity_id }}" class="font-mono text-sm text-accent hover:underline">{{ run.entity_name }}</a>
+          <span class="text-xs text-ink-faint ml-2">{{ run.results|length }} finding{{ '' if run.results|length == 1 else 's' }}{% if run.promoted %} · {{ run.promoted }} promoted{% endif %}</span>
+        </div>
+        <div class="flex items-center gap-3 text-xs text-ink-faint">
+          {% if run.process and run.process.tools_used %}<span class="font-mono">{{ run.process.tools_used|join(' · ') }}</span>{% endif %}
+          {% if run.started_at %}<span class="font-mono">{{ run.started_at[:16] }}</span>{% endif %}
+        </div>
+      </div>
+
+      <!-- How it investigated (the process trail) -->
+      {% if run.process %}
+      <div class="px-4 py-2.5 border-b border-bg-border">
+        <button @click="open = !open" class="text-xs text-ink-muted hover:text-accent flex items-center gap-1.5">
+          <span x-text="open ? '▾' : '▸'"></span> How it investigated
+          {% if run.process.turns %}<span class="text-ink-faint">· {{ run.process.turns }} turns</span>{% endif %}
+          {% if run.process.cost_usd %}<span class="text-ink-faint">· ${{ '%.3f'|format(run.process.cost_usd) }}</span>{% endif %}
+        </button>
+        <div x-show="open" x-cloak class="mt-2 text-sm text-ink space-y-2">
+          {% if run.process.summary %}<div class="text-ink-muted"><span class="font-medium text-ink">Summary.</span> {{ run.process.summary }}</div>{% endif %}
+          {% if run.process.narration %}<div class="text-xs text-ink-muted whitespace-pre-wrap bg-bg-soft rounded p-3 max-h-64 overflow-y-auto font-mono leading-relaxed">{{ run.process.narration }}</div>{% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Findings -->
+      <div class="divide-y divide-bg-border">
+        {% for f in run.results %}
+        <div class="px-4 py-3 flex items-start justify-between gap-3"
+             x-data="findingRow({{ f.id }}, {{ 'true' if f.extracted_entity_id else 'false' }})">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="role-pill role-{{ 'ioc' if f.confidence == 'high' else ('source' if f.confidence == 'low' else 'operator') }}">{{ f.confidence or 'medium' }}</span>
+              <span class="text-sm font-medium text-ink">{{ f.title }}</span>
+            </div>
+            <div class="text-sm text-ink-muted mt-1 markdown">{{ f.summary | md | safe }}</div>
+            {% if f.url %}<a href="{{ f.url }}" target="_blank" class="text-xs text-accent hover:underline font-mono">{{ f.url[:80] }}</a>{% endif %}
+            <div x-show="err" x-cloak class="text-xs text-sev-high mt-1" x-text="err"></div>
+          </div>
+          <button @click="promote()" x-show="!promoted" :disabled="busy" title="add to the graph if it's an indicator, else to the actor's dossier"
+                  class="shrink-0 text-xs px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent/5 disabled:opacity-50">
+            <span x-show="!busy">Save</span><span x-show="busy" x-cloak>…</span>
+          </button>
+          <span x-show="promoted" x-cloak class="shrink-0 text-xs text-conf-high font-medium px-2 py-1.5" x-text="'✓ ' + savedLabel"></span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function findingsView() { return {}; }
+function findingRow(resultId, isPromoted) {
+  return {
+    promoted: isPromoted, busy: false, err: '', savedLabel: 'saved',
+    async promote() {
+      this.busy = true; this.err = '';
+      try {
+        const d = await fetch('/api/enrich/result/' + resultId + '/promote', { method: 'POST' }).then(r => r.json());
+        if (d.error) { this.err = d.error; this.busy = false; return; }
+        this.savedLabel = d.added_to_dossier ? 'in dossier' : 'on graph';
+        this.promoted = true;
+      } catch (e) { this.err = 'Save failed'; this.busy = false; }
+    },
+  };
+}
+</script>
+{% endblock %}

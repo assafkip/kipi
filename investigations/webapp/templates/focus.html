@@ -1,0 +1,199 @@
+{% extends "_layout.html" %}
+{% block title %}Focus next · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto">
+
+  <div class="flex items-center justify-between mb-3">
+    <div>
+      <h1 class="text-2xl font-display font-semibold tracking-tight">Focus</h1>
+      <div class="text-sm text-ink-muted">
+        {% if focus and focus['scoped_to'] %}Top targets in <span class="font-mono text-accent">{{ focus['scoped_to'] }}</span> — look here first.
+        {% else %}Where to look first, ranked by attention.{% endif %}
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-ink-muted">
+      {% if focus['generated_at'] %}<span>updated {{ focus['generated_at'][:16] }}</span>{% endif %}
+    </div>
+  </div>
+
+  {# Movement delta — the "since you last looked" strip (all-cases run only). #}
+  {% set n_new = (focus['elevated']|length) if focus and focus['elevated'] else 0 %}
+  {% set n_cooled = (focus['cooling']|length) if focus and focus['cooling'] else 0 %}
+  {% if n_new or n_cooled %}
+  <div class="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm mb-3">
+    <span class="text-ink-faint uppercase text-[11px] tracking-wider">Since last run</span>
+    {% if n_new %}<a href="#elevated" class="flex items-center gap-1.5 text-conf-high font-medium"><span>▲</span> {{ n_new }} elevated</a>{% endif %}
+    {% if n_cooled %}<a href="#cooling" class="flex items-center gap-1.5 text-sev-high font-medium"><span>▼</span> {{ n_cooled }} cooled</a>{% endif %}
+  </div>
+  {% endif %}
+
+  {# Demoted stat strip — was the 5-card dashboard grid. #}
+  {% if stats %}
+  <div class="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-ink-muted mb-5 pb-3 border-b border-bg-border">
+    <span><span class="num font-mono text-ink font-semibold">{{ stats['reports'] }}</span> reports</span>
+    <span><span class="num font-mono text-ink font-semibold">{{ stats['entities'] }}</span> entities</span>
+    <span><span class="num font-mono text-ink font-semibold">{{ stats['mentions'] }}</span> mentions</span>
+    <span><span class="num font-mono text-ink font-semibold">{{ stats['relationships'] }}</span> relationships</span>
+    <a href="/graph" class="ml-auto hover:text-accent">open graph →</a>
+  </div>
+  {% endif %}
+
+  {% if focus and focus['gaps'] %}
+  <div class="bg-amber-500/5 border border-amber-500/30 rounded-lg p-4 mb-4">
+    <div class="text-xs font-semibold uppercase tracking-wider text-sev-med mb-2">Gaps &amp; what to look for next</div>
+    <ul class="space-y-2 text-sm">
+      {% for g in focus['gaps'] %}
+      <li class="flex items-start gap-2">
+        <span class="text-[10px] uppercase px-1.5 py-0.5 rounded mt-0.5 {% if g.severity=='high' %}bg-red-500/15 text-sev-high{% elif g.severity=='medium' %}bg-amber-500/15 text-sev-med{% else %}bg-gray-500/15 text-ink-muted{% endif %}">{{ g.severity }}</span>
+        <div>
+          <div class="text-ink">{{ g.title }}</div>
+          <div class="text-ink-muted text-xs mt-0.5">→ {{ g.action }}</div>
+          {% if g.entities %}
+          <div class="mt-1 flex flex-wrap gap-1">
+            {% for e in g.entities %}<a href="/entity/{{ e.id }}" class="text-xs font-mono px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded hover:border-accent">{{ e.name }}</a>{% endfor %}
+          </div>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if not focus or not focus['items'] %}
+  {% if focus and focus['scoped_to'] %}
+  <!-- Scoped to a case but no ranked targets: show the case-aware message, not
+       the generic global workflow. -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-6 text-center">
+    <div class="text-lg font-semibold mb-2">No focus for <span class="font-mono text-accent">{{ focus['scoped_to'] }}</span> yet</div>
+    <div class="text-sm text-ink-muted mb-3">{{ focus['summary'] or ('No scored entities in ' ~ focus['scoped_to'] ~ ' yet.') }}</div>
+    <div class="text-xs text-ink-muted">Hit <strong>Process</strong> on the case (Reports tab) to score its entities, or switch case in the top-right.</div>
+  </div>
+  {% else %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-6 text-center">
+    <div class="text-lg font-semibold mb-2">No focus brief yet</div>
+    <div class="text-sm text-ink-muted mb-4">
+      The picture sharpens with more data. The flow:
+    </div>
+    <ol class="text-sm text-left max-w-md mx-auto space-y-1.5 text-ink">
+      <li>1. <strong>Add reports</strong> — Reports tab → Files or Paste.</li>
+      <li>2. <strong>Approve the schema</strong> — Understand tab signs off the entity types.</li>
+      <li>3. <strong>Process the case</strong> — dedupes, types, builds typed links + clusters, scores targets.</li>
+      <li>4. <strong>Investigate</strong> the top targets — the detective enriches them + builds connections.</li>
+    </ol>
+    <div class="text-xs text-ink-muted mt-4">Each pass: more data + more investigation → sharper picture.</div>
+  </div>
+  {% endif %}
+  {% else %}
+
+  <!-- Summary -->
+  {% if focus['summary'] and 'no summary' not in focus['summary'] %}
+  <div class="bg-accent/10 border border-accent/40 rounded-lg p-4 mb-4">
+    <div class="text-xs uppercase tracking-wider text-accent mb-2">Analyst summary</div>
+    <div class="text-sm text-ink leading-relaxed">{{ focus['summary'] }}</div>
+  </div>
+  {% endif %}
+
+  <!-- Items -->
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden mb-4">
+    <div class="px-4 py-2 border-b border-bg-border bg-bg-soft">
+      <div class="text-xs uppercase tracking-wider text-ink-muted">Top targets ({{ focus['items']|length }})</div>
+    </div>
+    <ul class="divide-y divide-bg-border">
+      {% for it in focus['items'] %}
+      <li class="px-4 py-3 hover:bg-bg-soft">
+        <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+          <span class="text-xs text-ink-muted font-mono w-8">#{{ it.rank }}</span>
+          <a href="/entity/{{ it.entity_id }}" class="font-mono font-semibold hover:text-accent">{{ it.name }}</a>
+          <span class="role-pill role-{{ it.role }}">{{ it.role }}</span>
+          {% if it.sub_role %}<span class="sub-role-pill sub-role-{{ it.sub_role }}">{{ it.sub_role }}</span>{% endif %}
+          {% if it.seed_weight and it.seed_weight > 0 %}<span class="text-[10px] px-1.5 py-0.5 bg-red-500/15 text-sev-high rounded">SEED</span>{% endif %}
+          <span class="text-xs text-ink-muted font-mono ml-auto">score {{ it.score|int }}</span>
+          <span class="text-xs font-mono {% if it.status == 'NEW' %}text-accent{% elif it.status.startswith('+') %}text-conf-high{% elif it.status.startswith('-') %}text-sev-high{% else %}text-ink-muted{% endif %}">{{ it.status }}</span>
+        </div>
+        {% if it.why %}
+        <div class="ml-10 text-sm text-ink leading-relaxed">{{ it.why }}</div>
+        {% endif %}
+        {% if it.cluster_objs %}
+        <div class="ml-10 mt-1.5 flex flex-wrap gap-1">
+          {% for c in it.cluster_objs %}
+          <a href="/graph?cluster_id={{ c.id }}" class="cluster-chip hover:opacity-100"
+             style="{{ c.id|cluster_style }}">{{ c.name }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if it.top_relationships %}
+        <div class="ml-10 mt-1 flex flex-wrap gap-1.5">
+          {% for r in it.top_relationships %}
+          <a href="/entity/{{ r.other_id }}"
+             class="text-[10px] px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded hover:border-accent">
+            <span class="text-accent">{{ r.rel_type }}</span>
+            <span class="text-ink-muted">{% if r.dir == 'out' %}→{% else %}←{% endif %}</span>
+            <span class="font-mono text-ink">{{ r.other_name }}</span>
+          </a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  {% if focus['elevated'] %}
+  <div id="elevated" class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4 scroll-mt-16">
+    <div class="text-xs uppercase tracking-wider text-conf-high mb-2">Newly elevated this iteration</div>
+    <ul class="space-y-1 text-sm">
+      {% for it in focus['elevated'] %}
+      <li class="flex items-center gap-2">
+        <a href="/entity/{{ it.entity_id }}" class="font-mono hover:text-accent">{{ it.name }}</a>
+        <span class="text-xs text-ink-muted">{{ it.role }}{% if it.sub_role %}/{{ it.sub_role }}{% endif %}</span>
+        <span class="text-xs text-ink-muted ml-auto">rank {{ it.rank }} · score {{ it.score|int }} · {{ it.status }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if focus['cooling'] %}
+  <div id="cooling" class="bg-bg-card border border-bg-border rounded-lg p-4 mb-4 scroll-mt-16">
+    <div class="text-xs uppercase tracking-wider text-sev-high mb-2">Cooling off — dropped out of top targets</div>
+    <ul class="space-y-1 text-sm">
+      {% for it in focus['cooling'] %}
+      <li class="flex items-center gap-2">
+        <span class="font-mono">{{ it.name }}</span>
+        <span class="text-xs text-ink-muted ml-auto">was rank {{ it.rank }} at score {{ (it.prev_score or 0)|int }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- Methodology -->
+  <details class="mt-6 bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <summary class="px-4 py-3 cursor-pointer hover:bg-bg-soft text-sm font-semibold text-ink">
+      How to read these scores
+    </summary>
+    <div class="px-4 py-3 border-t border-bg-border text-sm text-ink space-y-3 leading-relaxed">
+      <p>Score is a <strong>rank-by-attention</strong> signal, not a maliciousness rating. Same data produces the same scores. Higher score = look here first.</p>
+      <div class="bg-bg-soft border border-bg-border rounded p-3 font-mono text-xs">
+        score = role×10 + reports×5 + degree×1 + seed×30 + propagation
+      </div>
+      <ul class="space-y-1.5 text-xs">
+        <li><strong class="text-ink">role × 10</strong> — operator=5, ioc=4, channel=3, infra=1, source=0. Operators carry the most analyst-relevant signal.</li>
+        <li><strong class="text-ink">reports × 5</strong> — distinct reports where the entity appears. Cross-report presence = persistent, not one-off.</li>
+        <li><strong class="text-ink">degree × 1</strong> — typed relationships the entity is part of. Network-central entities score higher.</li>
+        <li><strong class="text-ink">seed × 30</strong> — entities you've flagged as known-bad priors get a heavy boost.</li>
+        <li><strong class="text-ink">propagation</strong> — direct neighbors of a seed get <code>+seed × 10</code>, two-hop neighbors get <code>+seed × 4</code>. Associates of known-bad light up.</li>
+      </ul>
+      <p class="text-xs"><strong class="text-ink">Δ vs last</strong> = score change since the previous focus run. <span class="text-accent">NEW</span> = appeared in top targets for the first time. Each iteration sharpens as more data + more seeds feed in.</p>
+      <p class="text-xs"><strong class="text-sev-high">[SEED]</strong> = entity matched a name in your case-file priors. Not auto-discovered — you told the system this one matters.</p>
+    </div>
+  </details>
+
+  <div class="mt-4 text-xs text-ink-muted italic">
+    Want a fresh ranking? Re-run <strong>Process</strong> on the case — it re-scores after
+    new reports or investigations. Targets re-rank automatically.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

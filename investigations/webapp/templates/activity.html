@@ -1,0 +1,39 @@
+{% extends "_layout.html" %}
+{% block title %}Activity · kipi-investigations{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto">
+  {% include "_signals_views.html" %}
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-xl font-semibold">Activity</h1>
+      <p class="text-sm text-ink-muted mt-1">
+        Who did what, when.
+        {% if nav and nav.active_case %}Scoped to <span class="font-mono text-accent">{{ nav.active_case }}</span>.{% else %}Across all cases.{% endif %}
+        You're acting as <span class="font-mono text-accent">{{ nav.analyst if nav else 'anonymous' }}</span>
+        (<a href="#" onclick="window.__setAnalyst(); return false;" class="hover:text-accent underline">change</a>).
+      </p>
+    </div>
+  </div>
+
+  {% if not activity %}
+  <div class="bg-bg-card border border-bg-border rounded-lg p-8 text-center text-ink-muted">
+    No activity yet. Notes, flags, corrections, and acknowledgements show up here, stamped with who did them.
+  </div>
+  {% else %}
+  <div class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <ul class="divide-y divide-bg-border">
+      {% for a in activity %}
+      <li class="px-4 py-2.5 flex items-center gap-2 text-sm">
+        <span class="font-mono text-accent shrink-0">{{ a.analyst }}</span>
+        <span class="text-ink">{{ a.action }}</span>
+        {% if a.canonical_name %}<a href="/entity/{{ a.entity_id }}" class="font-mono text-ink hover:text-accent">{{ a.canonical_name }}</a>{% endif %}
+        {% if a.detail %}<span class="text-ink-muted text-xs">{{ a.detail }}</span>{% endif %}
+        {% if a.investigation %}<span class="text-[10px] font-mono px-1.5 py-0.5 bg-bg-soft rounded text-ink-muted">{{ a.investigation }}</span>{% endif %}
+        <span class="ml-auto text-xs text-ink-faint font-mono shrink-0">{{ a.created_at }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

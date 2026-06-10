@@ -1,0 +1,500 @@
+{% extends "_layout.html" %}
+{% block title %}Run trail · kipi-investigations{% endblock %}
+{% block content %}
+<style>
+  /* Vertical timeline for "what it did" — dot + connector line. */
+  .trail-step { position:relative; padding-left:28px; padding-bottom:14px; }
+  .trail-step:before { content:''; position:absolute; left:8px; top:18px; bottom:-2px; width:2px; background:#E6E4DF; }
+  .trail-step:last-child:before { display:none; }
+  .trail-dot { position:absolute; left:2px; top:3px; width:13px; height:13px; border-radius:50%; background:#FFFFFF; border:2px solid #0F766E; }
+</style>
+<div class="max-w-5xl mx-auto" x-data="runsView()"
+     x-init="loadTools(); if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (this.invDone) return; if (!document.querySelector(':focus')) location.reload(); })">
+
+  <div class="flex items-start justify-between gap-3 mb-4">
+    <div class="min-w-0">
+      <h1 class="font-display text-xl font-semibold text-ink">Investigate</h1>
+      <p class="text-sm text-ink-muted mt-0.5">
+        What the autonomous investigator did and what it found. <strong>Trail</strong> reads the narrative top-to-bottom; <strong>Findings</strong> is the flat, promotable list.
+      </p>
+    </div>
+    <div class="shrink-0 text-right">
+      <div class="text-2xl font-semibold text-ink num">{{ runs|length }}</div>
+      <div class="text-xs text-ink-faint">run{{ '' if runs|length == 1 else 's' }} · {{ finding_count }} finding{{ '' if finding_count == 1 else 's' }}{% if promoted_count %} · {{ promoted_count }} promoted{% endif %}</div>
+    </div>
+  </div>
+
+  <!-- Live step trail: streams the agent's real moves while an investigation runs.
+       Shows the instant you click (busy) so there's never a blank gap. -->
+  <div x-show="busyInv || invLog.length" x-cloak class="mb-4 bg-bg-card border border-bg-border rounded-lg p-4">
+    <div class="flex items-center justify-between mb-1.5">
+      <span class="text-sm font-medium text-ink">Investigating <span class="font-mono text-accent" x-text="invEntity"></span></span>
+      <div class="flex items-center gap-2" x-show="busyInv">
+        <span class="text-xs text-ink-faint">streaming…</span>
+        <!-- Stop: kills the agent, keeps whatever already landed. -->
+        <button @click="stopInvestigate()" :disabled="stopping"
+                class="text-xs px-2.5 py-1 border border-sev-high/40 text-sev-high rounded hover:bg-sev-high/10 disabled:opacity-50">
+          <span x-show="!stopping">■ Stop &amp; keep</span>
+          <span x-show="stopping" x-cloak>stopping…</span>
+        </button>
+      </div>
+    </div>
+    <!-- Live progress: phase + targets done/total + findings so far. Counts come
+         from the job's progress snapshot (parsed from the same events as the trail),
+         so the finding count is live mid-run instead of stuck at the load-time 0. -->
+    <template x-if="invProgress">
+    <div class="mb-2">
+      <div class="flex items-center justify-between text-xs text-ink-muted mb-1">
+        <span x-text="progressLabel()"></span>
+        <span class="num" x-text="invProgress.findings + ' finding' + (invProgress.findings === 1 ? '' : 's') + ' so far'"></span>
+      </div>
+      <div class="h-1.5 bg-bg-soft rounded overflow-hidden" x-show="invProgress.targets_total">
+        <div class="h-full bg-accent transition-all duration-500" :style="'width:' + progressPct() + '%'"></div>
+      </div>
+    </div>
+    </template>
+    <div x-ref="invlog"
+         class="h-48 overflow-auto rounded border border-bg-border bg-bg-soft px-3 py-2 font-mono text-xs leading-relaxed text-ink-muted whitespace-pre-wrap">
+      <div x-show="!invLog.length" class="text-ink-faint">starting the agent… (first step in ~15-30s)</div>
+      <template x-for="(line, i) in invLog" :key="i">
+        <div x-text="line"></div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Post-run recap: the moment the run finishes, a succinct "what it did + found"
+       block — bottom line, counts, gaps, the single best next move. Persists (the
+       auto-reload is suppressed while it's shown); "View full trail" loads the card. -->
+  <template x-if="invDone && invResult">
+  <div class="mb-4 rounded-lg p-4 border"
+       :class="invResult.stopped ? 'bg-sev-med/5 border-sev-med/40' : 'bg-conf-high/5 border-conf-high/40'">
+    <div class="flex items-center justify-between mb-1.5">
+      <span class="text-sm font-semibold text-ink"
+            x-text="invResult.stopped ? 'Stopped — kept what it found' : 'Investigation complete'"></span>
+      <button @click="location.reload()" class="text-xs text-accent hover:underline">View full trail ↓</button>
+    </div>
+    <div class="text-xs text-ink-muted mb-2 num">
+      <span x-text="(invResult.findings || 0) + ' finding' + ((invResult.findings === 1) ? '' : 's')"></span>
+      <template x-if="invResult.promoted"><span> · <span x-text="invResult.promoted"></span> promoted to graph</span></template>
+      <template x-if="invResult.cost_usd"><span> · $<span x-text="(invResult.cost_usd || 0).toFixed(3)"></span></span></template>
+    </div>
+    <div class="text-sm text-ink leading-relaxed mb-2"
+         x-text="(invResult.assessment && invResult.assessment.best_judgment) || invResult.summary || 'No summary returned.'"></div>
+    <template x-if="invResult.assessment && invResult.assessment.collection_gaps">
+      <div class="text-xs text-ink-muted mb-1"><span class="text-ink-faint">Gaps:</span> <span x-text="invResult.assessment.collection_gaps"></span></div>
+    </template>
+    <template x-if="invResult.recommended_pivots && invResult.recommended_pivots.length">
+      <div class="text-xs mt-1">
+        <span class="text-ink-faint uppercase tracking-wider">Next move</span>
+        <span class="font-mono text-accent" x-text="invResult.recommended_pivots[0].entity"></span>
+        <span class="text-ink-muted" x-text="invResult.recommended_pivots[0].why ? '— ' + invResult.recommended_pivots[0].why : ''"></span>
+      </div>
+    </template>
+  </div>
+  </template>
+
+  <!-- Tool readiness — tells you BEFORE a run that missing keys would make it
+       shallow, so thin findings are never a silent surprise. -->
+  <template x-if="tools">
+  <div class="mb-4 px-4 py-3 rounded-lg border text-sm flex flex-wrap items-center gap-x-3 gap-y-1"
+       :class="tools.missing_count ? 'bg-sev-med/5 border-sev-med/30' : 'bg-conf-high/5 border-conf-high/30'">
+    <span class="font-medium text-ink" x-text="tools.live_count + ' OSINT tool' + (tools.live_count === 1 ? '' : 's') + ' live'"></span>
+    <template x-if="tools.missing_count">
+      <span class="text-ink-muted">
+        · <span class="text-sev-med font-medium" x-text="tools.missing_count + ' need a key'"></span>:
+        <span x-text="tools.missing.map(m => m.name).join(', ')"></span>
+      </span>
+    </template>
+    <template x-if="tools.missing_count">
+      <a href="/enrich" class="text-accent hover:underline shrink-0">Add keys →</a>
+    </template>
+    <template x-if="!tools.missing_count">
+      <span class="text-conf-high">· full coverage</span>
+    </template>
+  </div>
+  </template>
+
+  {% if runs %}
+  <div class="flex items-center justify-between gap-3 mb-4 flex-wrap">
+    <!-- Trail | Findings view toggle — one stage, two emphases of the same data. -->
+    <div class="inline-flex items-center gap-1 p-0.5 bg-bg-soft rounded-lg text-sm">
+      <button @click="view = 'trail'"
+              :class="view === 'trail' ? 'bg-bg-card text-ink shadow-sm' : 'text-ink-muted hover:text-ink'"
+              class="px-3 py-1.5 rounded-md transition-colors">Trail</button>
+      <button @click="view = 'findings'"
+              :class="view === 'findings' ? 'bg-bg-card text-ink shadow-sm' : 'text-ink-muted hover:text-ink'"
+              class="px-3 py-1.5 rounded-md transition-colors">Findings</button>
+    </div>
+    <!-- Run another whole-case pass. The planner re-reads the case: it SKIPS targets
+         already investigated and prioritizes the new entities your last run surfaced,
+         so a second pass digs the fresh OSINT instead of redoing old work. -->
+    <button @click="investigateCase()" :disabled="busyInv"
+            title="Re-plans over the case. Skips already-investigated targets; digs the new entities your findings surfaced."
+            class="text-sm px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50 shrink-0">
+      <span x-show="!busyInv">↻ Run another pass</span>
+      <span x-show="busyInv" x-cloak>Investigating…</span>
+    </button>
+  </div>
+  {% endif %}
+
+  {% if not runs %}
+  {% set empty = {
+      "title": "No investigator runs yet",
+      "body": "The investigator goes out to the open web and digs on a target (whois, domain pivots, social, infra). Nothing has been sent out for this case yet — this step is optional."
+  } %}
+  <!-- Hide the "no runs yet / run it" prompt the moment a run starts streaming, so
+       a kicked-off run never reads as "nothing happened, click again". -->
+  <div x-show="!(busyInv || invLog.length)" x-cloak>
+    {% include "_empty_state.html" %}
+  </div>
+  {% else %}
+  <div class="space-y-5">
+    {% for run in runs %}
+    {% set p = run.process %}
+    <div class="bg-bg-card border border-bg-border rounded-lg shadow-card overflow-hidden rail rail-elev"
+         x-data="{ open: {{ 'true' if loop.first else 'false' }} }">
+
+      <!-- Target + run meta -->
+      <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-bg-border bg-bg-soft flex-wrap">
+        <div class="flex items-center gap-2 flex-wrap min-w-0">
+          <span class="text-[11px] text-ink-faint uppercase tracking-wider">Target</span>
+          <a href="/entity/{{ run.entity_id }}" class="font-mono font-semibold text-sm text-accent hover:underline">{{ run.entity_name }}</a>
+          {% if run.entity_role %}<span class="role-pill role-{{ run.entity_role }}">{{ run.entity_role }}</span>{% endif %}
+          {% if run.entity_sub_role %}<span class="sub-role-pill sub-role-{{ run.entity_sub_role }}">{{ run.entity_sub_role }}</span>{% endif %}
+        </div>
+        <div class="flex items-center gap-3 text-xs text-ink-faint num">
+          <span>{{ run.results|length }} finding{{ '' if run.results|length == 1 else 's' }}</span>
+          {% if run.promoted %}<span class="text-conf-high">· {{ run.promoted }} promoted</span>{% endif %}
+          {% if p and p.turns %}<span>· {{ p.turns }} turns</span>{% endif %}
+          {% if p and p.cost_usd %}<span>· ${{ '%.3f'|format(p.cost_usd) }}</span>{% endif %}
+          {% if run.started_at %}<span>· {{ run.started_at[:16] }}</span>{% endif %}
+        </div>
+      </div>
+
+      <div class="p-4 space-y-4">
+
+        <!-- What it started with -->
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint mb-2">What it started with</div>
+          <div class="text-sm space-y-1.5">
+            {% if run.query %}
+            <div class="flex gap-2"><span class="text-ink-faint w-24 shrink-0">Question</span><span class="text-ink">{{ run.query }}</span></div>
+            {% endif %}
+            <div class="flex gap-2"><span class="text-ink-faint w-24 shrink-0">Target</span><span class="text-ink font-mono">{{ run.entity_name }}{% if run.entity_role %} <span class="text-ink-muted">· {{ run.entity_role }}</span>{% endif %}</span></div>
+            {% if p and p.tools_used %}
+            <div class="flex gap-2"><span class="text-ink-faint w-24 shrink-0">Tools used</span>
+              <span class="flex flex-wrap gap-1.5">
+                {% for t in p.tools_used %}<span class="text-[10px] font-mono px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded text-accent-ink">{{ t }}</span>{% endfor %}
+              </span>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- What it did — the agent's REAL step trail (tool calls + results),
+             captured from the run. Trail view only; Findings view hides the
+             process narrative and shows just what it surfaced. -->
+        <template x-if="view === 'trail'">
+        <div>
+        {% set steps = p.steps if (p and p.steps) else None %}
+        {% set narr_lines = (p.narration.split('\n')|map('trim')|select|list) if (p and p.narration and not steps) else [] %}
+        {% if steps or narr_lines %}
+        {% set n_steps = (steps|length) if steps else (narr_lines|length) %}
+        <div>
+          <button @click="open = !open" class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint hover:text-accent flex items-center gap-1.5 mb-2">
+            <span x-text="open ? '▾' : '▸'"></span> What it did
+            <span class="text-ink-faint normal-case tracking-normal font-normal">· {{ n_steps }} step{{ '' if n_steps == 1 else 's' }}</span>
+          </button>
+          <div x-show="open" x-cloak class="mt-1">
+            <div class="border border-bg-border rounded-lg p-3.5 bg-bg-soft/40">
+              {% if steps %}
+                {% for s in steps %}
+                <div class="trail-step">
+                  <span class="trail-dot" {% if s.type != 'tool' %}style="border-color:#8A847D"{% endif %}></span>
+                  {% if s.type == 'tool' %}
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-[10px] text-ink-faint num">#{{ s.n }}</span>
+                    <span class="text-[10px] font-mono px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded text-accent-ink">{{ s.tool }}</span>
+                    {% if s.input %}<span class="text-sm text-ink font-mono">{{ s.input }}</span>{% endif %}
+                  </div>
+                  {% if s.result %}<div class="text-xs text-ink-muted mt-0.5 font-mono leading-relaxed">→ {{ s.result }}</div>{% endif %}
+                  {% else %}
+                  <div class="flex items-start gap-2">
+                    <span class="text-[10px] text-ink-faint num mt-0.5">#{{ s.n }}</span>
+                    <div class="text-sm text-ink leading-relaxed">{{ s.text }}</div>
+                  </div>
+                  {% endif %}
+                </div>
+                {% endfor %}
+              {% else %}
+                {% for line in narr_lines %}
+                <div class="trail-step">
+                  <span class="trail-dot"></span>
+                  <div class="text-sm text-ink leading-relaxed">{{ line }}</div>
+                </div>
+                {% endfor %}
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% elif p %}
+        <div class="text-xs text-ink-faint italic">No step-by-step trail recorded for this run.</div>
+        {% endif %}
+        </div>
+        </template>
+
+        <!-- What it found -->
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint mb-2">What it found · {{ run.results|length }}</div>
+          {% if not run.results %}
+          <div class="text-sm text-ink-muted">This run surfaced no promotable findings.</div>
+          {% else %}
+          <div class="border border-bg-border rounded-lg divide-y divide-bg-border">
+            {% for f in run.results %}
+            <div class="px-3.5 py-3 flex items-start justify-between gap-3"
+                 x-data="findingRow({{ f.id }}, {{ 'true' if f.extracted_entity_id else 'false' }})">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  {% set conf = f.confidence or 'medium' %}
+                  <span class="role-pill {{ 'role-infra' if conf == 'high' else ('role-source' if conf == 'low' else 'role-operator') }}">{{ conf }}</span>
+                  <span class="text-sm font-medium text-ink">{{ f.title }}</span>
+                </div>
+                {% if f.summary %}<div class="text-sm text-ink-muted mt-1 markdown">{{ f.summary | md | safe }}</div>{% endif %}
+                {% if f.url %}<a href="{{ f.url }}" target="_blank" class="text-xs text-accent hover:underline font-mono">{{ f.url[:80] }}</a>{% endif %}
+                {# Real provenance: which step produced this finding. #}
+                {% if f.step_ref %}
+                <div class="text-xs text-ink-faint mt-1">from <span class="font-mono text-ink-muted">step {{ f.step_ref }}{% if f.step_tool %} · {{ f.step_tool }}{% endif %}</span></div>
+                {% elif f.provenance %}
+                <div class="text-xs text-ink-faint mt-1">source: <span class="font-mono text-ink-muted">{{ f.provenance }}</span></div>
+                {% endif %}
+                <div x-show="err" x-cloak class="text-xs text-sev-high mt-1" x-text="err"></div>
+              </div>
+              <button @click="promote()" x-show="!promoted" :disabled="busy" title="add to the graph if it's an indicator, else to the actor's dossier"
+                      class="shrink-0 text-xs px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent/5 disabled:opacity-50">
+                <span x-show="!busy">Save</span><span x-show="busy" x-cloak>…</span>
+              </button>
+              <span x-show="promoted" x-cloak class="shrink-0 text-xs text-conf-high font-medium px-2 py-1.5" x-text="'✓ ' + savedLabel"></span>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+
+        <!-- Discovered assets: for each URL/domain/wallet the run touched — where it
+             came from, what was checked, whether it's live, and whether the agent
+             actually chased it (vs just naming it). -->
+        {% if run.assets %}
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint mb-2">Discovered assets · {{ run.assets|length }}</div>
+          <div class="border border-bg-border rounded-lg divide-y divide-bg-border">
+            {% for a in run.assets %}
+            <div class="px-3.5 py-2.5">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-mono text-sm text-ink">{{ a.asset }}</span>
+                <span class="text-[10px] px-1.5 py-0.5 bg-bg-soft border border-bg-border rounded text-ink-muted">{{ a.type }}</span>
+                {% if a.live == 'live' %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-conf-high/15 text-conf-high">live</span>
+                {% elif a.live == 'dead' %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-sev-high/15 text-sev-high">dead</span>
+                {% elif a.live == 'checked' %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-bg-soft text-ink-muted">checked</span>
+                {% elif a.live == 'not checked' %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-sev-med/15 text-sev-med">liveness not checked</span>{% endif %}
+                {% if a.pivoted %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">chased</span>
+                {% else %}<span class="text-[10px] px-1.5 py-0.5 rounded bg-sev-med/15 text-sev-med">surfaced only — not chased</span>{% endif %}
+                {% if a.promoted %}<span class="text-[10px] text-conf-high">✓ on graph</span>{% endif %}
+              </div>
+              <div class="text-xs text-ink-muted mt-1">found via <span class="font-mono">{{ a.found_via[:80] }}</span>{% if a.found_step %} <span class="text-ink-faint">· step {{ a.found_step }}</span>{% endif %}</div>
+              {% if a.checks %}<div class="text-xs text-ink-faint mt-0.5">checked with: {% for c in a.checks %}<span class="font-mono">{{ c }}</span>{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Bottom line -->
+        {% if p and p.summary %}
+        <div class="bg-accent/10 border border-accent/30 rounded-lg p-3.5">
+          <div class="text-[11px] uppercase tracking-wider text-accent mb-1">Bottom line</div>
+          <div class="text-sm text-ink leading-relaxed markdown">{{ p.summary | md | safe }}</div>
+          <div class="mt-2.5 flex items-center gap-2 flex-wrap">
+            <button @click="investigate('{{ run.entity_name|e }}')" :disabled="busyInv"
+                    class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+              <span x-show="!busyInv">Investigate {{ run.entity_name }} again →</span>
+              <span x-show="busyInv" x-cloak>Investigating…</span>
+            </button>
+            <button @click="regenBrief()" :disabled="busyBrief"
+                    class="text-xs px-3 py-1.5 border border-bg-line text-ink-muted rounded hover:bg-bg-soft disabled:opacity-50">
+              <span x-show="!busyBrief">Regenerate brief with new findings</span>
+              <span x-show="busyBrief" x-cloak>Regenerating…</span>
+            </button>
+            <span x-show="actionMsg" x-cloak class="text-xs text-ink-muted" x-text="actionMsg"></span>
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- PRD-04: next moves. Doable pivots are one-click investigations; only the
+             genuinely blocked ones (legal / internal / missing key) are recommendations. -->
+        {% if run.pivots_now or run.pivots_blocked %}
+        <div class="mt-3">
+          {% if run.pivots_now %}
+          <div class="text-[11px] uppercase tracking-wider text-ink-muted mb-1.5">Investigate now</div>
+          <div class="flex flex-col gap-1.5 mb-3">
+            {% for pv in run.pivots_now %}
+            <div class="flex items-start gap-2 text-sm">
+              <button @click="investigate('{{ pv.entity|e }}')" :disabled="busyInv"
+                      class="shrink-0 text-xs px-2.5 py-1 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+                Investigate →
+              </button>
+              <div class="min-w-0">
+                <span class="font-mono text-accent">{{ pv.entity }}</span>
+                {% if pv.why %}<span class="text-ink-muted"> — {{ pv.why }}</span>{% endif %}
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if run.pivots_blocked %}
+          <div class="text-[11px] uppercase tracking-wider text-ink-muted mb-1.5">Needs more than OSINT</div>
+          <div class="flex flex-col gap-1">
+            {% for pv in run.pivots_blocked %}
+            <div class="text-xs text-ink-muted">
+              <span class="font-mono">{{ pv.entity }}</span>
+              <span class="text-sev-med">· {{ pv.reason }}</span>
+              {% if pv.why %}<span> — {{ pv.why }}</span>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function runsView() {
+  return {
+    view: '{{ default_view|default("trail") }}',  // 'trail' | 'findings' (?view=findings)
+    tools: null,  // pre-run tool readiness (live vs needs-a-key)
+    busyInv: false, busyBrief: false, actionMsg: '',
+    invLog: [], invEntity: '', invTimer: null, invProgress: null,
+    stopping: false, invDone: false, invResult: null,  // Stop button + post-run recap
+    async stopInvestigate() {
+      if (this.stopping) return;
+      this.stopping = true;
+      try { await fetch('/api/investigate/stop', { method: 'POST' }); } catch (e) {}
+      // The poll loop picks up status=stopped and renders the recap.
+    },
+    progressPct() {
+      const p = this.invProgress;
+      if (!p || !p.targets_total) return 0;
+      return Math.min(100, Math.round(100 * p.targets_done / p.targets_total));
+    },
+    progressLabel() {
+      const p = this.invProgress;
+      if (!p) return '';
+      if (p.phase === 'extracting') return 'extracting new artifacts…';
+      if (p.phase === 'planning') return 'planning targets…';
+      if (p.phase === 'starting') return 'starting…';
+      if (p.targets_total) return p.targets_done + ' / ' + p.targets_total + ' targets';
+      return 'investigating…';
+    },
+    async loadTools() {
+      try { this.tools = await fetch('/api/investigate/preflight').then(r => r.json()); }
+      catch (e) {}
+      // Resume the live stream if a run is already going.
+      let running = false;
+      try {
+        const s = await fetch('/api/investigate/status').then(r => r.json());
+        if (s.status === 'running') {
+          running = true;
+          this.busyInv = true; this.invEntity = s.entity || '';
+          this.invLog = s.log || []; this.invProgress = s.progress || null;
+          this.pollInvestigate();
+        }
+      } catch (e) {}
+      // Arrived from the "Run the investigator" banner (?run=1) → auto-start a
+      // whole-case swarm. Strip the param so a refresh doesn't re-fire it.
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('run') === '1') {
+        history.replaceState({}, '', window.location.pathname);
+        if (!running) this.investigateCase();
+      }
+    },
+    async investigateCase() {
+      // Whole-case swarm: POST with no entity, the agent plans its own targets.
+      this.busyInv = true; this.actionMsg = ''; this.invLog = []; this.invEntity = 'whole case';
+      this.invDone = false; this.invResult = null; this.stopping = false;
+      this.invProgress = { phase: 'starting', targets_total: 0, targets_done: 0, findings: 0 };
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prep: true })   // brush new OSINT into typed entities first
+        }).then(r => r.json());
+        if (d.error) { this.actionMsg = d.error; this.busyInv = false; return; }
+        this.pollInvestigate();
+      } catch (e) { this.actionMsg = 'Investigate failed'; this.busyInv = false; }
+    },
+    async investigate(entity) {
+      this.busyInv = true; this.actionMsg = ''; this.invLog = []; this.invEntity = entity;
+      this.invDone = false; this.invResult = null; this.stopping = false;
+      this.invProgress = { phase: 'starting', targets_total: 0, targets_done: 0, findings: 0 };
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity })
+        }).then(r => r.json());
+        if (d.error) { this.actionMsg = d.error; this.busyInv = false; return; }
+        this.pollInvestigate();   // background job — stream the live step trail
+      } catch (e) { this.actionMsg = 'Investigate failed'; this.busyInv = false; }
+    },
+    pollInvestigate() {
+      if (this.invTimer) return;
+      this.invTimer = setInterval(async () => {
+        let d;
+        try { d = await fetch('/api/investigate/status').then(r => r.json()); }
+        catch (e) { return; }
+        if (Array.isArray(d.log)) {
+          const grew = d.log.length !== this.invLog.length;
+          this.invLog = d.log;
+          if (grew) this.$nextTick(() => {
+            const box = this.$refs.invlog;
+            if (box) box.scrollTop = box.scrollHeight;
+          });
+        }
+        if (d.progress) this.invProgress = d.progress;
+        if (d.status === 'running') return;
+        clearInterval(this.invTimer); this.invTimer = null;
+        this.busyInv = false; this.stopping = false;
+        if (d.status === 'error') { this.actionMsg = (d.result && d.result.error) || 'Investigate failed'; }
+        // done OR stopped → show the succinct recap in place (no blind reload).
+        else { this.invResult = d.result || {}; this.invDone = true; }
+      }, 1500);
+    },
+    async regenBrief() {
+      this.busyBrief = true; this.actionMsg = '';
+      try {
+        const d = await fetch('/api/synthesize', { method: 'POST' }).then(r => r.json());
+        if (d.error) { this.actionMsg = d.error; this.busyBrief = false; return; }
+        this.actionMsg = 'Brief regenerated.'; this.busyBrief = false;
+      } catch (e) { this.actionMsg = 'Brief regeneration failed'; this.busyBrief = false; }
+    },
+  };
+}
+function findingRow(resultId, isPromoted) {
+  return {
+    promoted: isPromoted, busy: false, err: '', savedLabel: 'saved',
+    async promote() {
+      this.busy = true; this.err = '';
+      try {
+        const d = await fetch('/api/enrich/result/' + resultId + '/promote', { method: 'POST' }).then(r => r.json());
+        if (d.error) { this.err = d.error; this.busy = false; return; }
+        this.savedLabel = d.added_to_dossier ? 'in dossier' : 'on graph';
+        this.promoted = true;
+      } catch (e) { this.err = 'Save failed'; this.busy = false; }
+    },
+  };
+}
+</script>
+{% endblock %}

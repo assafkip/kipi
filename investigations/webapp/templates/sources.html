@@ -1,0 +1,258 @@
+{% extends "_layout.html" %}
+{% block title %}Sources · kipi-investigations{% endblock %}
+{% block content %}
+<div x-data="sourcesView()" x-init="init()" class="max-w-7xl mx-auto">
+
+  <div class="flex items-center justify-between mb-3">
+    <div>
+      <h1 class="text-xl font-semibold">Sources</h1>
+      <div class="text-xs text-ink-muted"><span x-text="sources.length"></span> shown · OCR'd evidence images, screenshots, page captures</div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="view = 'grid'" :class="view === 'grid' ? 'bg-bg-card border-accent' : 'bg-bg-soft border-bg-border'"
+              class="px-3 py-1.5 text-xs border rounded hover:border-accent">Grid</button>
+      <button @click="view = 'table'" :class="view === 'table' ? 'bg-bg-card border-accent' : 'bg-bg-soft border-bg-border'"
+              class="px-3 py-1.5 text-xs border rounded hover:border-accent">Table</button>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-bg-card border border-bg-border rounded-lg p-3 mb-4">
+    <div class="flex items-center gap-2 flex-wrap">
+      <select x-model="filters.report_id" @change="load()"
+              class="bg-bg-soft border border-bg-border rounded px-3 py-1.5 text-sm min-w-[200px]">
+        <option value="">all reports</option>
+        <template x-for="r in facets.reports" :key="r.id">
+          <option :value="r.id" x-text="r.title.slice(0, 60) + ' (' + (r.d || '?') + ')'"></option>
+        </template>
+      </select>
+      <select x-model="filters.date" @change="load()"
+              class="bg-bg-soft border border-bg-border rounded px-3 py-1.5 text-sm">
+        <option value="">all dates</option>
+        <template x-for="d in facets.dates" :key="d">
+          <option :value="d" x-text="d"></option>
+        </template>
+      </select>
+      <input type="text" x-model="filters.q" @input.debounce.300ms="load()"
+             placeholder="search OCR text…"
+             class="bg-bg-soft border border-bg-border rounded px-3 py-1.5 text-sm flex-1 min-w-[200px]">
+      <input type="text" x-model="entityNameInput" @input.debounce.250ms="searchEntities()"
+             placeholder="filter by entity name…"
+             class="bg-bg-soft border border-bg-border rounded px-3 py-1.5 text-sm w-56">
+      <button @click="clearFilters()" class="text-xs text-ink-muted hover:text-ink px-2 py-1.5">clear</button>
+    </div>
+
+    <!-- Active filter chips -->
+    <div class="mt-2 flex flex-wrap gap-1.5" x-show="activeChips().length > 0">
+      <template x-for="chip in activeChips()" :key="chip.key">
+        <span class="text-xs px-2 py-0.5 bg-accent/15 text-accent rounded border border-accent/30 cursor-pointer"
+              @click="removeChip(chip)">
+          <span x-text="chip.label"></span> ✕
+        </span>
+      </template>
+    </div>
+
+    <!-- Entity autocomplete dropdown -->
+    <div x-show="entityResults.length > 0" class="mt-2 bg-bg-soft border border-bg-border rounded">
+      <template x-for="e in entityResults" :key="e.id">
+        <button @click="pickEntity(e)"
+                class="block w-full text-left px-3 py-2 text-sm hover:bg-bg-card border-b border-bg-border">
+          <span class="role-pill" :class="'role-' + (e.role || '')" x-text="e.role || e.entity_type"></span>
+          <span class="font-mono ml-2" x-text="e.canonical_name"></span>
+        </button>
+      </template>
+    </div>
+  </div>
+
+  <!-- Grid view -->
+  <div x-show="view === 'grid'" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+    <template x-for="(a, idx) in sources" :key="a.id">
+      <button @click="open(idx)"
+              class="block bg-bg-card border border-bg-border rounded overflow-hidden hover:border-accent text-left">
+        <img :src="'/vault-assets/' + a.vault_image" class="w-full h-32 object-cover bg-bg-soft" loading="lazy">
+        <div class="p-2 text-xs">
+          <div class="text-ink truncate" x-text="a.report_title"></div>
+          <div class="text-ink-muted" x-text="'p' + (a.page_number || '?') + ' · ' + (a.ingest_date || '')"></div>
+          <div class="mt-1 flex flex-wrap gap-0.5" x-show="a.entities && a.entities.length > 0">
+            <template x-for="e in (a.entities || []).slice(0, 3)" :key="e.id">
+              <span class="text-[10px] px-1 py-0 bg-bg-soft text-ink-muted rounded truncate max-w-[6rem]"
+                    x-text="e.canonical_name"></span>
+            </template>
+            <span x-show="a.entities && a.entities.length > 3" class="text-[10px] text-ink-muted"
+                  x-text="'+' + (a.entities.length - 3)"></span>
+          </div>
+        </div>
+      </button>
+    </template>
+  </div>
+
+  <!-- Table view -->
+  <div x-show="view === 'table'" class="bg-bg-card border border-bg-border rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-bg-soft text-xs uppercase tracking-wider text-ink-muted">
+        <tr>
+          <th class="text-left px-3 py-2 w-24">Thumb</th>
+          <th class="text-left px-3 py-2">Report</th>
+          <th class="text-left px-3 py-2 w-20">Page</th>
+          <th class="text-left px-3 py-2 w-28">Date</th>
+          <th class="text-left px-3 py-2">Entities</th>
+          <th class="text-left px-3 py-2 w-12"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-bg-border">
+        <template x-for="(a, idx) in sources" :key="a.id">
+          <tr class="hover:bg-bg-soft cursor-pointer" @click="open(idx)">
+            <td class="px-3 py-2">
+              <img :src="'/vault-assets/' + a.vault_image" class="w-16 h-12 object-cover rounded bg-bg-soft" loading="lazy">
+            </td>
+            <td class="px-3 py-2">
+              <div class="font-medium truncate max-w-md" x-text="a.report_title"></div>
+              <div class="text-xs text-ink-muted truncate max-w-md font-mono" x-text="(a.ocr_text || '').slice(0, 80) + ((a.ocr_text || '').length > 80 ? '…' : '')"></div>
+            </td>
+            <td class="px-3 py-2 font-mono text-xs" x-text="a.page_number || '—'"></td>
+            <td class="px-3 py-2 font-mono text-xs text-ink-muted" x-text="a.ingest_date || '—'"></td>
+            <td class="px-3 py-2">
+              <div class="flex flex-wrap gap-1">
+                <template x-for="e in (a.entities || []).slice(0, 6)" :key="e.id">
+                  <a :href="'/entity/' + e.id" @click.stop
+                     class="text-xs px-1.5 py-0.5 bg-bg-soft text-ink hover:text-accent rounded border border-bg-border">
+                    <span x-text="e.canonical_name"></span>
+                  </a>
+                </template>
+                <span x-show="a.entities && a.entities.length > 6" class="text-xs text-ink-muted"
+                      x-text="'+' + (a.entities.length - 6) + ' more'"></span>
+              </div>
+            </td>
+            <td class="px-3 py-2 text-ink-muted">↗</td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div x-show="sources.length === 0" class="text-center py-12 text-ink-muted">
+    No sources match these filters.
+  </div>
+
+  <!-- Lightbox -->
+  <div x-show="selectedIdx !== null" x-cloak @click.self="selectedIdx = null"
+       class="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-8"
+       @keydown.escape.window="selectedIdx = null"
+       @keydown.arrow-left.window="selectedIdx !== null && selectedIdx > 0 ? selectedIdx-- : null"
+       @keydown.arrow-right.window="selectedIdx !== null && selectedIdx < sources.length - 1 ? selectedIdx++ : null">
+    <div class="bg-bg-card border border-bg-border rounded-lg max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between p-3 border-b border-bg-border">
+        <div>
+          <div class="text-sm font-medium" x-text="selectedIdx !== null ? sources[selectedIdx].report_title : ''"></div>
+          <div class="text-xs text-ink-muted">
+            <span x-text="selectedIdx !== null ? 'page ' + (sources[selectedIdx].page_number || '?') : ''"></span>
+            ·
+            <span x-text="selectedIdx !== null ? (sources[selectedIdx].ingest_date || '') : ''"></span>
+            ·
+            <span x-text="selectedIdx !== null ? ((selectedIdx + 1) + ' of ' + sources.length) : ''"></span>
+          </div>
+        </div>
+        <button @click="selectedIdx = null" class="text-ink-muted hover:text-ink text-xl px-2">✕</button>
+      </div>
+      <div class="flex-1 overflow-auto p-4">
+        <img :src="selectedIdx !== null ? '/vault-assets/' + sources[selectedIdx].vault_image : ''" class="max-w-full mx-auto">
+        <div class="mt-4">
+          <div class="text-xs uppercase text-ink-muted mb-2">Linked entities</div>
+          <div class="flex flex-wrap gap-1.5" x-show="selectedIdx !== null && sources[selectedIdx].entities && sources[selectedIdx].entities.length > 0">
+            <template x-for="e in (selectedIdx !== null ? sources[selectedIdx].entities : [])" :key="e.id">
+              <a :href="'/entity/' + e.id" target="_blank"
+                 class="text-xs px-2 py-1 bg-bg-soft border border-bg-border rounded hover:border-accent">
+                <span class="font-mono" x-text="e.canonical_name"></span>
+              </a>
+            </template>
+          </div>
+        </div>
+        <div class="mt-4 text-sm text-ink whitespace-pre-wrap font-mono"
+             x-text="selectedIdx !== null ? (sources[selectedIdx].ocr_text || '(no OCR text)') : ''"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function sourcesView() {
+  return {
+    view: 'grid',
+    sources: [],
+    facets: { reports: [], dates: [] },
+    filters: { report_id: '', entity_id: '', date: '', q: '' },
+    entityNameInput: '',
+    entityResults: [],
+    pinnedEntity: null,
+    selectedIdx: null,
+
+    async init() {
+      const url = new URL(location.href);
+      const ep = url.searchParams;
+      if (ep.has('report_id')) this.filters.report_id = ep.get('report_id');
+      if (ep.has('entity_id')) this.filters.entity_id = ep.get('entity_id');
+      if (ep.has('date')) this.filters.date = ep.get('date');
+      if (ep.has('q')) this.filters.q = ep.get('q');
+      await this.load();
+    },
+
+    async load() {
+      const params = new URLSearchParams();
+      for (const k of ['report_id', 'entity_id', 'date', 'q']) {
+        if (this.filters[k]) params.set(k, this.filters[k]);
+      }
+      params.set('limit', 500);
+      const d = await fetch('/api/sources?' + params).then(r => r.json());
+      this.sources = d.sources || [];
+      this.facets = d.facets || { reports: [], dates: [] };
+    },
+
+    async searchEntities() {
+      if (this.entityNameInput.length < 2) { this.entityResults = []; return; }
+      const r = await fetch('/api/search?q=' + encodeURIComponent(this.entityNameInput));
+      const d = await r.json();
+      this.entityResults = (d.results || []).slice(0, 8);
+    },
+
+    pickEntity(e) {
+      this.filters.entity_id = e.id;
+      this.pinnedEntity = e;
+      this.entityNameInput = '';
+      this.entityResults = [];
+      this.load();
+    },
+
+    activeChips() {
+      const chips = [];
+      if (this.filters.report_id) {
+        const r = this.facets.reports.find(x => String(x.id) === String(this.filters.report_id));
+        chips.push({ key: 'report_id', label: 'report: ' + (r ? r.title.slice(0, 40) : this.filters.report_id) });
+      }
+      if (this.filters.date) chips.push({ key: 'date', label: 'date: ' + this.filters.date });
+      if (this.filters.q) chips.push({ key: 'q', label: 'q: "' + this.filters.q + '"' });
+      if (this.filters.entity_id) {
+        const label = this.pinnedEntity ? this.pinnedEntity.canonical_name : ('entity #' + this.filters.entity_id);
+        chips.push({ key: 'entity_id', label: 'entity: ' + label });
+      }
+      return chips;
+    },
+
+    removeChip(chip) {
+      this.filters[chip.key] = '';
+      if (chip.key === 'entity_id') this.pinnedEntity = null;
+      this.load();
+    },
+
+    clearFilters() {
+      this.filters = { report_id: '', entity_id: '', date: '', q: '' };
+      this.pinnedEntity = null;
+      this.entityNameInput = '';
+      this.entityResults = [];
+      this.load();
+    },
+
+    open(idx) { this.selectedIdx = idx; },
+  }
+}
+</script>
+{% endblock %}

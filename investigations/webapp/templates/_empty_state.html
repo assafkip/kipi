@@ -1,0 +1,29 @@
+{# Reusable empty-room (ui-ux-pro-max `empty-states`: message + action, never a
+   blank). Caller sets `empty = {title, body}` in context. The primary button and
+   the "already done — your work is over here" banner come from nav.next_action, so
+   every empty page points forward AND back to whatever's already produced. #}
+<div class="max-w-md mx-auto text-center py-12">
+  <div class="w-12 h-12 mx-auto mb-3 rounded-full bg-bg-soft flex items-center justify-center text-ink-faint">
+    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="7"/><path d="m20 20-3-3" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <h2 class="text-base font-medium text-ink">{{ empty.title }}</h2>
+  <p class="text-sm text-ink-muted mt-1 mb-4">{{ empty.body }}</p>
+  {% if nav and nav.next_action %}
+  <a href="{{ nav.next_action.href }}"
+     class="inline-block text-sm px-4 py-2 bg-accent text-white rounded hover:bg-accent-hover">
+    {{ nav.next_action.label }}
+  </a>
+  {% endif %}
+  {% if nav and nav.next_action and nav.next_action.ready %}
+  <div class="mt-6 p-3 bg-bg-soft rounded text-sm flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+    <span class="text-ink-muted">Already done:</span>
+    {% for r in nav.next_action.ready %}
+    <a href="{{ r.href }}" class="text-accent hover:underline whitespace-nowrap">
+      {{ r.label }}{% if r.count %} ({{ r.count }}){% endif %} ›
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

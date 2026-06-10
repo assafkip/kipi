@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Run trail (mockup) · kipi-investigations</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      fontFamily: {
+        sans: ['Inter','system-ui','sans-serif'],
+        display: ['Space Grotesk','Inter','system-ui','sans-serif'],
+        mono: ['IBM Plex Mono','ui-monospace','monospace'],
+      },
+      colors: {
+        bg:   { DEFAULT:'#FAFAF9', soft:'#F4F4F3', card:'#FFFFFF', border:'#E6E4DF', line:'#D6D3CC' },
+        ink:  { DEFAULT:'#1A1A19', muted:'#57534E', faint:'#8A847D' },
+        accent:{ DEFAULT:'#0F766E', hover:'#0B5F58', ink:'#0B4F49' },
+        role: { operator:'#C2410C', channel:'#7E22CE', ioc:'#B91C1C', infra:'#15803D', source:'#475569' },
+        conf: { high:'#15803D', medium:'#B45309', low:'#57534E' },
+      },
+      boxShadow: {
+        card:'0 1px 2px rgba(28,25,23,0.04), 0 1px 3px rgba(28,25,23,0.06)',
+        pop:'0 8px 24px rgba(28,25,23,0.10), 0 2px 6px rgba(28,25,23,0.06)',
+      },
+    }}
+  }
+</script>
+<style>
+  body { background:#FAFAF9; color:#1A1A19; }
+  .num { font-variant-numeric: tabular-nums; }
+  .rail { border-left:3px solid var(--rail,#0F766E); }
+  .rail-high{--rail:#B91C1C} .rail-elev{--rail:#B45309} .rail-watch{--rail:#0F766E}
+  .role-pill { font:600 10px/1.4 'Inter',sans-serif; padding:2px 7px; border-radius:3px; text-transform:uppercase; letter-spacing:.04em; }
+  .role-operator{background:rgba(234,88,12,.12);color:#C2410C}
+  .role-channel{background:rgba(147,51,234,.10);color:#7E22CE}
+  .role-ioc{background:rgba(220,38,38,.10);color:#B91C1C}
+  .role-infra{background:rgba(22,163,74,.12);color:#15803D}
+  .role-source{background:rgba(71,85,105,.10);color:#475569}
+  .kbd { font-family:'IBM Plex Mono',monospace; font-size:11px; background:#F4F4F3; color:#57534E; padding:1px 5px; border-radius:3px; border:1px solid #E6E4DF; }
+  .tool-badge { font:500 10px/1.4 'IBM Plex Mono',monospace; padding:2px 7px; border-radius:3px; background:#F4F4F3; color:#0B4F49; border:1px solid #E6E4DF; }
+  /* timeline dot/line */
+  .step { position:relative; padding-left:34px; padding-bottom:18px; }
+  .step:before { content:''; position:absolute; left:11px; top:22px; bottom:-4px; width:2px; background:#E6E4DF; }
+  .step:last-child:before { display:none; }
+  .step-dot { position:absolute; left:4px; top:3px; width:16px; height:16px; border-radius:50%; background:#FFFFFF; border:2px solid #0F766E; display:flex; align-items:center; justify-content:center; }
+  .step-dot.tool { border-color:#0F766E; }
+  .step-dot.think { border-color:#8A847D; }
+  .step-dot.found { border-color:#15803D; background:#15803D; }
+</style>
+</head>
+<body class="font-sans antialiased min-h-screen">
+<div class="flex min-h-screen">
+
+  <!-- Sidebar: REGROUPED by lifecycle stage (the "arrows on the floor") -->
+  <aside class="w-56 shrink-0 bg-bg-card border-r border-bg-border flex flex-col">
+    <div class="flex items-center gap-2 px-4 h-12 border-b border-bg-border">
+      <span class="text-xs px-1.5 py-0.5 bg-accent text-white rounded tracking-wide font-display font-semibold">kipi</span>
+      <span class="text-sm font-display font-semibold">investigations</span>
+    </div>
+    <nav class="flex-1 px-2 pb-6 text-sm">
+      <!-- Each group is now a LIFECYCLE STAGE, numbered, in order -->
+      <div class="px-3 pt-4 pb-1 flex items-center gap-2">
+        <span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">1 · Intake</span>
+      </div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Reports</a>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Sources</a>
+
+      <div class="px-3 pt-4 pb-1"><span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">2 · Understand</span></div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Schema gate <span class="ml-auto text-[10px] text-conf-high">✓</span></a>
+
+      <div class="px-3 pt-4 pb-1"><span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">3 · Investigate</span></div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Entities</a>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Graph</a>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-accent bg-accent/10 text-accent font-medium" href="#">Run trail <span class="ml-auto text-[10px] bg-accent text-white rounded-full px-1.5 leading-4">new</span></a>
+
+      <div class="px-3 pt-4 pb-1"><span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">4 · Findings</span></div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Findings <span class="ml-auto text-[10px] text-ink-faint num">7</span></a>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Enrich</a>
+
+      <div class="px-3 pt-4 pb-1"><span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">5 · Deliver</span></div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Brief <span class="ml-auto text-[10px] text-sev-med" style="color:#B45309">stale</span></a>
+
+      <div class="px-3 pt-4 pb-1"><span class="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">6 · Portfolio</span></div>
+      <a class="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md border-l-2 border-transparent text-ink-muted hover:bg-bg-soft" href="#">Cross-case links</a>
+    </nav>
+  </aside>
+
+  <!-- Content -->
+  <div class="flex-1 min-w-0 flex flex-col">
+    <div class="sticky top-0 z-30 bg-bg/85 backdrop-blur border-b border-bg-border">
+      <div class="px-4 h-12 flex items-center gap-3">
+        <span class="text-[10px] uppercase tracking-wider text-ink-faint">mockup — not wired</span>
+        <div class="flex-1"></div>
+        <span class="flex items-center gap-2 text-sm bg-bg-soft border border-bg-border px-3 py-1.5 rounded">
+          <span class="text-[11px] text-ink-faint uppercase tracking-wider">Case</span>
+          <span class="font-mono text-xs text-accent">case-a</span>
+        </span>
+      </div>
+    </div>
+
+    <main class="px-4 py-5 w-full max-w-[920px] mx-auto">
+
+      <!-- LIFECYCLE PROGRESS RAIL -->
+      <div class="flex items-center gap-1 text-[11px] font-medium mb-5 overflow-x-auto">
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-conf-high/10 text-conf-high whitespace-nowrap"><span>✓</span> Intake</span>
+        <span class="text-ink-faint">›</span>
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-conf-high/10 text-conf-high whitespace-nowrap"><span>✓</span> Understand</span>
+        <span class="text-ink-faint">›</span>
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-accent text-white whitespace-nowrap"><span>●</span> Investigate</span>
+        <span class="text-ink-faint">›</span>
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-bg-soft text-ink-muted whitespace-nowrap">Findings</span>
+        <span class="text-ink-faint">›</span>
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-bg-soft text-ink-muted whitespace-nowrap">Deliver</span>
+        <span class="text-ink-faint">›</span>
+        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-bg-soft text-ink-muted whitespace-nowrap">Portfolio</span>
+      </div>
+
+      <!-- HEADER -->
+      <div class="flex items-start justify-between gap-3 mb-1">
+        <div class="min-w-0">
+          <h1 class="font-display text-xl font-semibold">Run trail</h1>
+          <p class="text-sm text-ink-muted mt-0.5">What the autonomous investigator actually did, start to finish. Read top-to-bottom: what went in, every move it made, what it found, how sure it is.</p>
+        </div>
+      </div>
+
+      <!-- TARGET + RUN META -->
+      <div class="bg-bg-card border border-bg-border rounded-lg shadow-card p-4 mb-4 rail rail-elev">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs text-ink-faint uppercase tracking-wider">Target</span>
+            <span class="font-mono font-semibold text-base">@example_handle</span>
+            <span class="role-pill role-operator">operator</span>
+            <span class="text-[10px] px-1.5 py-0.5 bg-red-500/15 rounded" style="color:#B91C1C">SEED</span>
+          </div>
+          <div class="flex items-center gap-4 text-xs text-ink-faint num">
+            <span>2026-05-29 14:02</span>
+            <span>·</span>
+            <span>12 turns</span>
+            <span>·</span>
+            <span>$0.184</span>
+            <span>·</span>
+            <span class="text-conf-high font-medium">done</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- INPUT -->
+      <div class="mb-4">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint mb-2">What it started with</div>
+        <div class="bg-bg-card border border-bg-border rounded-lg shadow-card p-4 text-sm space-y-2">
+          <div class="flex gap-2"><span class="text-ink-faint w-28 shrink-0">Question</span><span class="text-ink">Map @example_handle's operational ties to Iranian MOIS-linked hacktivist infrastructure.</span></div>
+          <div class="flex gap-2"><span class="text-ink-faint w-28 shrink-0">Known going in</span><span class="text-ink">Twitter/X handle, appears in 3 reports, flagged as <span class="font-mono">operator</span> on the approved schema, marked as a seed prior.</span></div>
+          <div class="flex gap-2"><span class="text-ink-faint w-28 shrink-0">Tools allowed</span>
+            <span class="flex flex-wrap gap-1.5">
+              <span class="tool-badge">twitter-scraper</span>
+              <span class="tool-badge">web-search</span>
+              <span class="tool-badge">telegram</span>
+              <span class="tool-badge">whois</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- WHAT IT DID (the homework) -->
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint">What it did · 12 steps</div>
+          <button class="text-xs text-ink-muted hover:text-accent">collapse all</button>
+        </div>
+        <div class="bg-bg-card border border-bg-border rounded-lg shadow-card p-4">
+
+          <div class="step">
+            <span class="step-dot think"></span>
+            <div class="text-sm text-ink">Read the 3 reports @example_handle appears in. Pulled out a co-mentioned handle <span class="font-mono text-accent">@second_handle</span> and a Telegram link <span class="font-mono text-accent">t.me/example_channel</span>.</div>
+            <div class="text-xs text-ink-faint mt-0.5">reasoning</div>
+          </div>
+
+          <div class="step">
+            <span class="step-dot tool"></span>
+            <div class="text-sm text-ink">Scraped @example_handle's X profile + last 200 posts.</div>
+            <div class="flex items-center gap-2 mt-1"><span class="tool-badge">twitter-scraper</span><span class="text-xs text-ink-faint">198 posts · bio mentions "example_channel team" · joined 2023-08</span></div>
+          </div>
+
+          <div class="step">
+            <span class="step-dot think"></span>
+            <div class="text-sm text-ink">Noticed the bio string "example_channel" matches the Telegram channel. Decided to confirm the channel is the same group.</div>
+            <div class="text-xs text-ink-faint mt-0.5">reasoning</div>
+          </div>
+
+          <div class="step">
+            <span class="step-dot tool"></span>
+            <div class="text-sm text-ink">Pulled the <span class="font-mono">t.me/example_channel</span> channel metadata + pinned message.</div>
+            <div class="flex items-center gap-2 mt-1"><span class="tool-badge">telegram</span><span class="text-xs text-ink-faint">1,402 members · admin handle @second_handle · pinned: defacement claim 2026-04</span></div>
+          </div>
+
+          <div class="step">
+            <span class="step-dot tool"></span>
+            <div class="text-sm text-ink">WHOIS + nameserver lookup on the defacement-claim domain.</div>
+            <div class="flex items-center gap-2 mt-1"><span class="tool-badge">whois</span><span class="text-xs text-ink-faint">ns shared with 2 other domains already in the case graph</span></div>
+          </div>
+
+          <div class="step">
+            <span class="step-dot found"></span>
+            <div class="text-sm text-ink font-medium">Concluded @second_handle is the channel admin and is directly tied to @example_handle via the example_channel group.</div>
+            <div class="text-xs text-ink-faint mt-0.5">finding · high confidence</div>
+          </div>
+
+          <div class="text-center pt-1">
+            <button class="text-xs text-accent hover:underline">show 6 more steps ▾</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- WHAT IT FOUND -->
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint">What it found · 7 findings</div>
+          <div class="text-xs text-ink-faint"><span class="text-conf-high font-medium">3 high</span> · <span class="text-conf-medium font-medium">3 medium</span> · <span class="text-conf-low font-medium">1 low</span></div>
+        </div>
+        <div class="bg-bg-card border border-bg-border rounded-lg shadow-card divide-y divide-bg-border">
+
+          <div class="px-4 py-3 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="role-pill role-ioc">high</span>
+                <span class="text-sm font-medium">@second_handle is the example_channel channel admin, directly tied to @example_handle</span>
+              </div>
+              <div class="text-sm text-ink-muted mt-1">Telegram channel metadata lists @second_handle as sole admin; @example_handle's bio names the same group. Two independent sources.</div>
+              <div class="text-xs text-ink-faint mt-1">from <span class="font-mono">step 6</span> · sources: <span class="font-mono">twitter-scraper, telegram</span></div>
+            </div>
+            <button class="shrink-0 text-xs px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent/5">Promote</button>
+          </div>
+
+          <div class="px-4 py-3 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="role-pill role-ioc">high</span>
+                <span class="text-sm font-medium">Defacement domain shares a nameserver with 2 known case domains</span>
+              </div>
+              <div class="text-sm text-ink-muted mt-1">Same-operator infrastructure signal. Links this cluster to entities already in the case-a graph.</div>
+              <div class="text-xs text-ink-faint mt-1">from <span class="font-mono">step 5</span> · sources: <span class="font-mono">whois</span></div>
+            </div>
+            <span class="shrink-0 text-xs text-conf-high font-medium px-2 py-1.5">✓ promoted</span>
+          </div>
+
+          <div class="px-4 py-3 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="role-pill role-operator">medium</span>
+                <span class="text-sm font-medium">@example_handle account created 2 weeks before first example_channel defacement</span>
+              </div>
+              <div class="text-sm text-ink-muted mt-1">Timing consistent with a purpose-built persona, but could be coincidence. Needs a second corroborating signal.</div>
+              <div class="text-xs text-ink-faint mt-1">from <span class="font-mono">step 2</span> · sources: <span class="font-mono">twitter-scraper</span></div>
+            </div>
+            <button class="shrink-0 text-xs px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent/5">Promote</button>
+          </div>
+
+          <div class="px-4 py-3 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="role-pill role-source">low</span>
+                <span class="text-sm font-medium">Possible reused profile image (reverse-image partial match)</span>
+              </div>
+              <div class="text-sm text-ink-muted mt-1">Single weak match, not corroborated. Flagged for analyst review, not promoted.</div>
+              <div class="text-xs text-ink-faint mt-1">from <span class="font-mono">step 9</span> · sources: <span class="font-mono">web-search</span></div>
+            </div>
+            <button class="shrink-0 text-xs px-3 py-1.5 border border-bg-line text-ink-muted rounded hover:bg-bg-soft">Promote</button>
+          </div>
+
+          <div class="px-4 py-2.5 text-center">
+            <button class="text-xs text-accent hover:underline">show 3 more findings ▾</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOTTOM LINE -->
+      <div class="bg-accent/10 border border-accent/40 rounded-lg p-4">
+        <div class="text-[11px] uppercase tracking-wider text-accent mb-1.5">Bottom line</div>
+        <div class="text-sm text-ink leading-relaxed">@example_handle and @second_handle are operationally tied through the example_channel Telegram channel, and the group's infrastructure overlaps with domains already in this case. Two high-confidence findings promoted to the graph. Recommend running the same investigation on <span class="font-mono">@second_handle</span> next to close the loop.</div>
+        <div class="mt-3 flex items-center gap-2">
+          <button class="text-xs px-3 py-1.5 bg-accent text-white rounded hover:bg-accent-hover">Investigate @second_handle →</button>
+          <button class="text-xs px-3 py-1.5 border border-bg-line text-ink-muted rounded hover:bg-bg-soft">Regenerate brief with new findings</button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+</body>
+</html>
