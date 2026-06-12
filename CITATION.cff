@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use kipi in your work, please cite it."
+title: kipi
+abstract: >-
+  kipi is an open-source, self-hosted OSINT investigation platform. It turns
+  documents (PDFs, screenshots, spreadsheets, notes) into a live, typed entity
+  graph, then runs an autonomous investigator agent that digs the open web,
+  pivots on infrastructure, grades findings by evidence tier, and writes a
+  brief. Includes graph analytics (centrality, communities, pathfinding) and a
+  keyless-first OSINT tool belt.
+type: software
+authors:
+  - family-names: Kipnis
+    given-names: Assaf
+repository-code: "https://github.com/assafkip/kipi"
+url: "https://github.com/assafkip/kipi"
+license: Elastic-2.0
+keywords:
+  - osint
+  - threat-intelligence
+  - entity-graph
+  - graph-analytics
+  - link-analysis
+  - fraud-investigation
+  - intelligence-analysis
+  - self-hosted
