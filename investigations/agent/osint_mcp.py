@@ -129,6 +129,14 @@ def dns_history(domain: str) -> str:
 
 
 @mcp.tool()
+def reverse_ns(nameserver: str) -> str:
+    """Reverse NS: every domain using a nameserver — the campaign-wide pivot when a
+    scam cluster runs custom NS (ns1.streetplug.me -> the whole streetplug portfolio).
+    Needs WHOISXML_API_KEY. Arg: a nameserver hostname."""
+    return _call("whoisxml", nameserver, mode="reverse_ns")
+
+
+@mcp.tool()
 def breach_intel(indicator: str) -> str:
     """Breach / infostealer exposure for a DOMAIN (employees/users compromised) or an
     EMAIL/login (stealer records). HudsonRock Cavalier, free + keyless. Run this in the
@@ -150,6 +158,38 @@ def censys_host(target: str) -> str:
     system, and DNS names for an IP (or a domain, resolved to its IP). Needs a Censys
     API ID + secret (enter as 'id:secret' on the Enrich page). Arg: an IP or domain."""
     return _call("censys", target)
+
+
+@mcp.tool()
+def abuseipdb(ip: str) -> str:
+    """AbuseIPDB IP reputation: abuse-confidence score, total reports, usage type, ISP,
+    country, and any reported domain/hostnames for an IP. Needs ABUSEIPDB_API_KEY (free
+    tier 1k/day). Arg: a public IP."""
+    return _call("abuseipdb", ip)
+
+
+@mcp.tool()
+def urlscan(target: str) -> str:
+    """urlscan.io scan SEARCH: the domains + IPs urlscan has already observed for a
+    domain/host/IP — a related-infrastructure pivot. Works KEYLESS (rate-limited); add
+    URLSCAN_API_KEY for higher quota. Does not submit new scans. Arg: a domain or IP."""
+    return _call("urlscan", target)
+
+
+@mcp.tool()
+def otx(indicator: str) -> str:
+    """AlienVault OTX: threat-pulse context (known campaigns, tags, malware) plus passive
+    DNS (related domains/IPs) for a domain/IP/URL/hash. Type auto-detected. Needs
+    OTX_API_KEY (free). Arg: a domain, IP, URL, or file hash."""
+    return _call("otx", indicator)
+
+
+@mcp.tool()
+def hibp(value: str) -> str:
+    """Have I Been Pwned breach exposure: an email -> which breaches it appears in (needs
+    HIBP_API_KEY); a domain -> breaches recorded against that site (public catalog).
+    Arg: an email address or a domain."""
+    return _call("hibp", value)
 
 
 @mcp.tool()
@@ -253,6 +293,164 @@ def wallet_tx(address: str) -> str:
     ETH (Etherscan) needs ETHERSCAN_API_KEY. Counterparty addresses are promotable pivots.
     Arg: a BTC or ETH address."""
     return _call("wallet", address)
+
+
+@mcp.tool()
+def ofac_screen(query: str) -> str:
+    """OFAC sanctions screen (T1). A 0x EVM wallet -> Chainalysis on-chain sanctions
+    oracle (isSanctioned); a person/org name -> OFAC SDN list match. Keyless. A hit is
+    a confirmed compliance finding (US Treasury record)."""
+    return _call("ofac", query)
+
+
+@mcp.tool()
+def ens_resolve(query: str) -> str:
+    """ENS resolution (T1, keyless). A *.eth name -> its 0x address (forward); a 0x
+    address -> its primary .eth name (reverse). Emits a handle<->crypto_wallet crosslink
+    that feeds the 2-crosslink attribution floor."""
+    return _call("ens", query)
+
+
+@mcp.tool()
+def wallet_labels(query: str) -> str:
+    """Etherscan public label for a 0x address (exchange / mixer / phish / known entity),
+    from a local vendored dataset. Keyless. T3 TAG ONLY — triage context, NEVER a citable
+    finding. An exchange label = where to subpoena; a mixer/sanctioned tag = a risk flag."""
+    return _call("wallet_labels", query)
+
+
+@mcp.tool()
+def wallet_tokens(address: str) -> str:
+    """ERC-20 token flow for an ETH 0x address (USDT/USDC etc move via tokentx, invisible
+    to the native wallet_tx). Each distinct token counterparty is a promotable pivot with
+    the token symbol on the edge. Needs ETHERSCAN_API_KEY (self-guards to [needs key]). T1."""
+    return _call("wallet", address, mode="erc20")
+
+
+@mcp.tool()
+def tron_wallet(address: str) -> str:
+    """Tron wallet (T-address): TRC-20 transfers + counterparties via keyless TronGrid.
+    The dominant USDT pig-butchering rail. Each counterparty is a promotable crypto_wallet
+    pivot. Keyless. T1 (on-chain TRC-20 record)."""
+    return _call("tron", address)
+
+
+@mcp.tool()
+def solana_wallet(address: str) -> str:
+    """Solana wallet (base58 address): recent tx signatures + counterparty accounts via the
+    keyless public JSON-RPC. The memecoin rug/drainer surface. Each counterparty is a
+    promotable crypto_wallet pivot. Keyless. T1 (on-chain record)."""
+    return _call("solana", address)
+
+
+@mcp.tool()
+def blockchair_tx(address: str) -> str:
+    """Multi-chain wallet balance + activity for a BTC/LTC/BCH/DOGE address via Blockchair
+    (keyless free tier). Closes the non-BTC/ETH UTXO-chain gap. T1 (on-chain record)."""
+    return _call("blockchair", address)
+
+
+@mcp.tool()
+def wallet_cluster(address: str) -> str:
+    """Which exchange/service clusters a BTC address (WalletExplorer heuristic) = the
+    subpoena target. Keyless. T3 LEAD only — a hypothesis, NEVER a written finding;
+    corroborate before citing."""
+    return _call("walletexplorer", address)
+
+
+@mcp.tool()
+def ton_tx(address: str) -> str:
+    """TON wallet (EQ.../UQ... address): balance + transfer counterparties via keyless
+    TONAPI. Each counterparty is a promotable crypto_wallet pivot. Keyless. T1."""
+    return _call("wallet_ton", address)
+
+
+@mcp.tool()
+def crypto_abuse(target: str) -> str:
+    """Crypto-scam blocklist check for a wallet address or domain (Scam Sniffer). Keyless.
+    T3 LEAD only — a flag, NEVER a written finding; corroborate before citing. The crypto
+    mirror of the abuse.ch/AbuseIPDB infra feeds."""
+    return _call("crypto_abuse", target)
+
+
+@mcp.tool()
+def darkweb_search(query: str) -> str:
+    """Search the Ahmia .onion index (clearnet, no Tor client) by domain / org / handle for
+    dark-web leads. Keyless. T3 LEADS only — hypothesis queue, NEVER a written finding.
+    Serves hacktivist + leak-market / financial-fraud cases."""
+    return _call("darkweb", query)
+
+
+@mcp.tool()
+def asn_lookup(target: str) -> str:
+    """IP -> ASN -> netblock owner (Team Cymru, keyless). The shared/bulletproof-hosting
+    pivot: a shared ASN/org behind two IPs ties their infra together. Arg: an IPv4 or an
+    AS number (AS15169). T1 (BGP/registry origin)."""
+    return _call("asn", target)
+
+
+@mcp.tool()
+def phone_parse(number: str) -> str:
+    """Parse a phone number offline (libphonenumber): region, carrier, line-type incl. VoIP
+    (a fraud/disposable signal). Keyless, deterministic. Arg: a number in E.164 (+<cc>...).
+    T1/T2 — but a phone as an identity anchor still needs an independent second source."""
+    return _call("phone", number)
+
+
+@mcp.tool()
+def exif_extract(path: str) -> str:
+    """EXIF metadata from an image/PDF via the exiftool binary: GPS coordinates (a geo
+    anchor) + device make/model/serial (a fingerprint). Keyless; self-guards if exiftool
+    is not installed. Arg: a local file path."""
+    return _call("exif", path)
+
+
+@mcp.tool()
+def greynoise(ip: str) -> str:
+    """GreyNoise scanner classification for an IP: benign mass-scanner / known-good (RIOT) /
+    malicious noise / UNSEEN (more likely targeted at you). Triage for intrusion-apt; no
+    VT/AbuseIPDB overlap. Needs GREYNOISE_API_KEY (free; self-guards). T2."""
+    return _call("greynoise", ip)
+
+
+@mcp.tool()
+def opencorporates(query: str) -> str:
+    """Company registry (OpenCorporates): an org -> jurisdiction/number/status + officers;
+    a person -> officer positions. T1 government registry for shell-company attribution.
+    Freemium (OPENCORPORATES_API_KEY raises the cap; works keyless rate-limited)."""
+    return _call("opencorporates", query)
+
+
+@mcp.tool()
+def git_emails(target: str) -> str:
+    """Mine commit-author emails from a public repo URL or a handle's repos (keyless `git`).
+    A mined email is T2 ONLY when it corroborates an already-scraped email (anchor rule);
+    alone it is a hypothesis lead. Arg: a github/gitlab repo URL or a handle."""
+    return _call("git_osint", target)
+
+
+@mcp.tool()
+def holehe(email: str) -> str:
+    """holehe: which of ~120 sites an email has an account on. Account-enumeration =
+    HYPOTHESIS leads (corroborate before any finding), not a crosslink. Keyless (needs the
+    holehe lib). Arg: an email address."""
+    return _call("email", email, mode="holehe")
+
+
+@mcp.tool()
+def dns_deep(domain: str) -> str:
+    """Deep DNS posture for a domain: SPF / DMARC policy, mail provider (from MX), and an
+    AXFR zone-transfer attempt (usually refused; an OPEN transfer is the finding). Keyless.
+    T1 (non-fakeable DNS records)."""
+    return _call("infra", domain, mode="dns_deep")
+
+
+@mcp.tool()
+def typosquat(domain: str) -> str:
+    """Generate lookalike phishing-domain candidates for a domain (dnstwist: homoglyph /
+    typo / TLD-swap), then DNS-confirm them. Only LIVE candidates (T1, resolving) become
+    nodes; unconfirmed ones are header-only leads. Keyless. Arg: a bare domain."""
+    return _call("typosquat", domain)
 
 
 @mcp.tool()

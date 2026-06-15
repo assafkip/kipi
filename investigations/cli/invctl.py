@@ -22,7 +22,7 @@ from investigations import alerts as alerts_mod
 from investigations import claims as claims_mod
 from investigations import focus as focus_mod
 from investigations import briefs as briefs_mod
-from investigations.enrich import all_adapters, get_adapter
+from investigations.enrich import get_adapter
 from investigations.enrich import runner as enrich_runner
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -226,6 +226,15 @@ def _ingest_one(conn, path: Path, investigation: str | None):
             return
         title = _title_from(path)
 
+    # EXIF (PRD-5): geotag/device metadata from dropped images/PDFs is appended to the
+    # report text so GPS/serial are captured + searchable (previously discarded). No-ops
+    # cleanly when exiftool is absent or the file carries no EXIF.
+    if source_type in ("screenshot", "pdf"):
+        from investigations.enrich import exif as _exif
+        exif_block = _exif.exif_summary_for_ingest(str(path))
+        if exif_block:
+            text = (text or "") + "\n\n" + exif_block
+
     report_id = db.insert_report(
         conn, str(path), file_hash, source_type, title, investigation, text
     )
@@ -247,7 +256,10 @@ def _ingest_one(conn, path: Path, investigation: str | None):
             if asset.ocr_text:
                 per_image_entities = extractor.extract_all(asset.ocr_text)
                 for e in per_image_entities:
-                    eid = db.upsert_entity(conn, e.canonical, e.entity_type, report_id)
+                    from investigations import store
+                    eid = store.apply_mutation(conn, store.entity_upserted(
+                        investigation, e.canonical, e.entity_type, report_id,
+                        actor=f"ingest:{report_id}", gate=False))["entity_id"]
                     if e.surface != e.canonical:
                         db.add_alias(conn, eid, e.surface)
                     db.add_mention(
@@ -277,8 +289,11 @@ def _ingest_one(conn, path: Path, investigation: str | None):
         )
 
     extracted = extractor.extract_all(text)
+    from investigations import store
     for e in extracted:
-        eid = db.upsert_entity(conn, e.canonical, e.entity_type, report_id)
+        eid = store.apply_mutation(conn, store.entity_upserted(
+            investigation, e.canonical, e.entity_type, report_id,
+            actor=f"ingest:{report_id}", gate=False))["entity_id"]
         if e.surface != e.canonical:
             db.add_alias(conn, eid, e.surface)
         db.add_mention(conn, eid, report_id, e.surface, e.context, e.offset,
@@ -286,8 +301,12 @@ def _ingest_one(conn, path: Path, investigation: str | None):
 
     relationships = extractor.infer_relationships(text, extracted)
     for a, b, rel_type in relationships:
-        a_id = db.upsert_entity(conn, a.canonical, a.entity_type, report_id)
-        b_id = db.upsert_entity(conn, b.canonical, b.entity_type, report_id)
+        a_id = store.apply_mutation(conn, store.entity_upserted(
+            investigation, a.canonical, a.entity_type, report_id,
+            actor=f"ingest:{report_id}", gate=False))["entity_id"]
+        b_id = store.apply_mutation(conn, store.entity_upserted(
+            investigation, b.canonical, b.entity_type, report_id,
+            actor=f"ingest:{report_id}", gate=False))["entity_id"]
         if a_id != b_id:
             db.add_relationship(
                 conn, a_id, b_id, rel_type, report_id,
@@ -518,6 +537,39 @@ def cmd_reextract(args):
           f"{out['new_entities']} new entities, {out['new_mentions']} new mentions")
     for t, n in sorted(out["by_type"].items(), key=lambda x: -x[1]):
         print(f"    {t}: {n}")
+
+
+def cmd_retro_clean(args):
+    from investigations.maintenance import retro_clean
+    dry = getattr(args, "dry", False)
+    with db.connect() as conn:
+        out = retro_clean.run(conn, getattr(args, "case", None), dry=dry)
+    ph, w, at = out["phones"], out["wallets"], out["attribution"]
+    verb = "would be " if dry else ""
+    print(f"\nRetro-clean {'DRY RUN — nothing written' if dry else 'complete'}:")
+    print(f"    phones: {ph['deleted']} junk {verb}deleted ({ph['checked']} checked)")
+    for name in ph["names"]:
+        print(f"        - {name}")
+    tw = out.get("escape_twins", {"merged": 0, "pairs": []})
+    print(f"    escape twins: {tw['merged']} parse-mangled twin(s) {verb}merged")
+    for dup, survivor in tw.get("pairs", []):
+        print(f"        - {dup} -> {survivor}")
+    noise = out.get("noise", {"deleted": 0, "items": []})
+    print(f"    noise: {noise['deleted']} reference/junk node(s) {verb}deleted")
+    for name, why in noise.get("items", []):
+        print(f"        - {name}: {why}")
+    print(f"    wallets: {w['merged']} case-twin(s) {verb}merged")
+    for dup, survivor in w["pairs"]:
+        print(f"        - {dup} -> {survivor}")
+    print(f"    attribution: {at['dropped']} edge(s) {verb}dropped, "
+          f"{at['demoted']} {verb}demoted to co_listed")
+    for e in at["edges"]:
+        print(f"        - {e['src']} -[{e['rel_type']}/{e['confidence'] or 'medium'}]-> "
+              f"{e['dst']}: {e['action']}")
+    et = out["edge_times"]
+    print(f"    edge times: {et['stamped']} legacy edge(s) {verb}stamped")
+    for e in et["edges"]:
+        print(f"        - {e['src']} -[{e['rel_type']}]-> {e['dst']}: {e['stamp']}")
 
 
 def cmd_correlate_fingerprints(args):
@@ -851,7 +903,7 @@ def backfill_docx_assets(conn) -> dict:
     from investigations.ingest import docx_assets
     repaired_reports, total_assets, missing = 0, 0, []
     rows = conn.execute(
-        "SELECT id, source_path FROM reports WHERE source_type = 'docx' "
+        "SELECT id, source_path, investigation FROM reports WHERE source_type = 'docx' "
         "AND id NOT IN (SELECT DISTINCT report_id FROM assets)").fetchall()
     for r in rows:
         rid = r["id"]
@@ -876,7 +928,10 @@ def backfill_docx_assets(conn) -> dict:
             total_assets += 1
             if asset.ocr_text:
                 for e in extractor.extract_all(asset.ocr_text):
-                    eid = db.upsert_entity(conn, e.canonical, e.entity_type, rid)
+                    from investigations import store
+                    eid = store.apply_mutation(conn, store.entity_upserted(
+                        r["investigation"], e.canonical, e.entity_type, rid,
+                        actor=f"ingest:{rid}", gate=False))["entity_id"]
                     if e.surface != e.canonical:
                         db.add_alias(conn, eid, e.surface)
                     db.add_mention(conn, eid, rid, e.surface, e.context, e.offset,
@@ -1005,6 +1060,11 @@ def build_parser() -> argparse.ArgumentParser:
     rx = sub.add_parser("reextract", help="Re-run the extractor over existing reports (backfill new entity types)")
     rx.add_argument("--case", default=None, help="Only this case (default: all)")
     rx.set_defaults(func=cmd_reextract)
+
+    rc = sub.add_parser("retro-clean", help="Apply write-time extraction fixes to old data: junk phones, escape-twins, noise nodes, wallet case-twins, ungated same_operator edges")
+    rc.add_argument("--case", default=None, help="Only this case (default: all)")
+    rc.add_argument("--dry", action="store_true", help="Report every candidate action by name; write nothing")
+    rc.set_defaults(func=cmd_retro_clean)
 
     cf = sub.add_parser("correlate-fingerprints", help="Link entities sharing a tracking tag / WalletConnect id / nameserver")
     cf.add_argument("--case", default=None, help="Only this case (default: all)")

@@ -17,7 +17,7 @@ def test_progress_parse_swarm_flow():
     _check("starts at zero", prog == {"phase": "starting", "targets_total": 0,
                                       "targets_done": 0, "findings": 0})
 
-    # Replay the exact lines investigate_case/volley emit (see swarm.py).
+    # Replay the exact lines volley/investigate_selected emit (see swarm.py).
     app_module._update_progress(prog, "planning targets…")
     _check("planning phase", prog["phase"] == "planning")
 

@@ -53,21 +53,28 @@ PLANNER_SYSTEM = (
 # parallel and doubled the VirusTotal / crt.sh hits.
 TARGET_TYPES = ("domain", "ip", "handle", "telegram_channel", "crypto_wallet", "email")
 DEFAULT_LIMIT = 12          # cap targets per volley
-import os as _os0
-# Analyst-driven default (docs/21): a whole-case run does a SMALL bounded SEED — the top
-# few highest-priority pivots — then STOPS. The analyst expands the rest node/edge by
-# node on demand. Deliberately well below DEFAULT_LIMIT and below deep's cost-capped
-# scope, so the default provably uses less than deep (verified by usage_smoke_test.py).
-ANALYST_SEED_LIMIT = int(_os0.environ.get("KIPI_ANALYST_SEED", "3"))
 DEFAULT_CONCURRENCY = 2     # 2-wide, not 4: 4 agents hammering one IP got Reddit to
                             # 403-block us and tripped VirusTotal's 4/min limit. Fewer
                             # simultaneous external calls = far less self-throttling.
+# CREW DECISION (settled, prd-spine-phase0 2026-06-11): the swarm runs PARALLEL
+# across targets and SEQUENTIAL within one target. Targets are independent
+# units (each parallel worker opens its OWN sqlite connection, see module
+# docstring), so parallelism there is safe, bounded by DEFAULT_CONCURRENCY and
+# the shared provider rate limits. Within a single target the investigator is
+# ONE sequential agent — fanning out interdependent slices of one
+# investigation wastes tokens and worsens results (the batch-fanout lesson:
+# only batch INDEPENDENT units). Change this comment if either direction is
+# ever re-decided; code and rationale move together.
 # PRD-09 depth engine — deeper than the old single-volley, but HARD-BOUNDED on cost so
 # a whole-case run can't surprise you with a $50 bill. The dollar cap is the real
 # ceiling; the round/entity caps just keep it sane. The loop stops when it's DRY, hits
 # the $ cap, or hits the round/entity cap — and it SAYS which (never silent).
 import os as _os
-MAX_ROUNDS = 3              # loop-until-dry round cap
+MAX_ROUNDS = 5              # loop-until-dry round cap. Spec value: the PRD-09 depth
+                            # engine fixed 5; the constant shipped as 3 and drifted
+                            # unnoticed (gap 1, prd-spine-phase0 2026-06-11). Pinned by
+                            # tests/test_spec_conformance.py — change BOTH or the build
+                            # goes red. The $ cap stays the real ceiling.
 DEEP_TURNS = int(_os.environ.get("KIPI_DEEP_TURNS", "40"))  # per-target tool-call budget.
                            # Raised 20->40: a browser-heavy dig was burning all 20 turns
                            # and getting CAPPED before it could emit findings. The $ cap
@@ -79,6 +86,9 @@ DEEP_ENTITY_BUDGET = 20    # max DISTINCT entities a single deep run will invest
 DEEP_COST_CAP_USD = float(_os.environ.get("KIPI_DEEP_COST_CAP", "5"))
 # Rough cost of one target's agent run (used to size the target budget from the $ cap).
 EST_COST_PER_TARGET = float(_os.environ.get("KIPI_EST_COST_PER_TARGET", "0.9"))
+# Rough cost of a single ONE-HOP expand: deterministic infra belt (whois/dns/crtsh, free)
+# + one capped suggest-next-hop LLM call. Tiny, but not zero — show it honestly.
+EST_COST_PER_ONE_HOP = float(_os.environ.get("KIPI_EST_COST_PER_ONE_HOP", "0.01"))
 
 
 def _targets(conn, case: str | None, limit: int) -> list[str]:
@@ -176,7 +186,13 @@ def ensure_seed_domains(conn, case: str | None) -> int:
         rep = r["rep"]
         if not host or rep is None:
             continue
-        eid = db.upsert_entity(conn, host, "domain", rep)
+        from investigations import store
+        # gate=False: this path never gated pre-migration (hosts derive from
+        # in-case urls already past extraction admission). Tightening is
+        # Phase 3+ work, not this migration (behavior preserved verbatim).
+        eid = store.apply_mutation(conn, store.entity_upserted(
+            case, host, "domain", rep, actor="pipeline:swarm",
+            gate=False))["entity_id"]
         # Always ensure the host domain has a mention IN THIS CASE (Codex k4p-01): if the
         # entity already exists globally we must STILL scope it into this case, or it's
         # absent from the case roster + the scope-bound roster and gets denied in caged
@@ -269,6 +285,12 @@ def _investigate_one(entity: str, case: str | None, max_turns: int,
     every parallel worker re-ran the migration (DDL) on connect, they'd collide on
     the schema write lock → 'database is locked'. Workers only read + write rows."""
     tagged = (lambda line: on_event(f"{entity} · {line}")) if on_event else None
+    # UNTAGGED per-target start signal: fires when this worker thread actually picks the
+    # target up (not when it was queued), so the progress parser can flip THIS target to
+    # `running`. Must NOT match any aggregate-parse marker (picked/✓/✗/crew merged) — it
+    # starts with "→ start " which none of those do (run-progress-semantics, finding-4).
+    if on_event:
+        on_event(f"→ start {entity}")
     try:
         with db.connect(migrate=False) as conn:
             # Boss + crew: each target is investigated by focused parallel sub-agents
@@ -303,75 +325,13 @@ def volley(conn, case: str | None, targets: list[str], max_turns: int = DEEP_TUR
     return results
 
 
-def merge_volley(results: list[dict]) -> dict:
-    """Merge + dedup a volley's per-worker results into ONE reproducible inventory —
-    the 4_points first-volley -> merge-volley step (G-VOLLEY-MERGE). Deduplicates
-    targets by canonical name (keeping the richest result per target), and lists
-    distinct investigated vs failed targets + aggregate findings, so a collection round
-    is an auditable artifact instead of N independent worker blobs."""
-    by_name: dict[str, dict] = {}
-    for r in results or []:
-        name = (r.get("entity") or "?").strip().lower()
-        cur = by_name.get(name)
-        rf, cf = (r.get("findings", 0) or 0), (cur.get("findings", 0) or 0) if cur else -1
-        # keep the richest result per distinct target; on a findings tie prefer a
-        # SUCCESSFUL result over a failed duplicate (Codex).
-        if cur is None or rf > cf or (rf == cf and r.get("ok") and not cur.get("ok")):
-            by_name[name] = r
-    merged = list(by_name.values())
-    investigated = [r for r in merged if r.get("ok")]
-    return {
-        "distinct_targets": len(merged),
-        "investigated": [r.get("entity") for r in investigated],
-        "failed": [r.get("entity") for r in merged if not r.get("ok")],
-        "total_findings": sum(r.get("findings", 0) or 0 for r in investigated),
-        "results": merged,
-    }
-
-
-def investigate_case(conn, case: str | None, max_turns: int = DEEP_TURNS,
-                     concurrency: int = DEFAULT_CONCURRENCY,
-                     limit: int = DEFAULT_LIMIT, on_event=None) -> dict:
-    """One swarm volley. The investigator PLANS its own targets (persona pass), then
-    investigates them and builds the graph (findings auto-promote)."""
-    if on_event:
-        on_event("planning targets…")
-    targets, plan = plan_investigation(conn, case, limit)
-    if not targets:
-        if on_event:
-            on_event("no pivotable entities in scope to investigate")
-        return {"ok": True, "case": case, "targets": 0,
-                "note": "no pivotable entities in scope to investigate"}
-    if on_event:
-        on_event(f"picked {len(targets)} target(s): {', '.join(targets)}")
-    results = volley(conn, case, targets, max_turns=max_turns,
-                     concurrency=concurrency, on_event=on_event)
-    merged = merge_volley(results)  # reproducible dedup'd inventory (G-VOLLEY-MERGE)
-    if on_event:
-        on_event(f"merge: {merged['distinct_targets']} distinct target(s), "
-                 f"{merged['total_findings']} finding(s)")
-    # Counts come from the DEDUPED inventory, not the raw per-worker list (Codex), so
-    # G-VOLLEY-MERGE actually shapes the API result.
-    deduped = merged["results"]
-    ok = [r for r in deduped if r.get("ok")]
-    findings = sum(r.get("findings", 0) for r in ok)
-    promoted = sum(r.get("promoted", 0) for r in ok)
-    from investigations import activity as activity_mod
-    activity_mod.log(conn, "agent-swarm", f"planned + investigated {len(ok)} target(s), "
-                     f"{findings} findings, {promoted} graph nodes", investigation=case)
-    return {"ok": True, "case": case, "targets": len(targets), "plan": plan,
-            "investigated": len(ok), "failed": len(deduped) - len(ok),
-            "findings": findings, "promoted": promoted, "tools": tool_status(),
-            "merged": merged, "results": deduped}
-
-
 def investigate_selected(conn, case: str | None, targets: list[str],
                          max_turns: int = DEEP_TURNS, concurrency: int = DEFAULT_CONCURRENCY,
                          on_event=None) -> dict:
     """Run the FULL investigator agent on an explicit, analyst-chosen set of targets —
     no planner. This is PRD-07: 'run a full investigation on specific nodes, more than
-    one at a time.' Unlike investigate_case, the analyst picks; covered nodes are NOT
-    skipped (an explicit pick overrides the planner's skip). Dedupes + caps the set."""
+    one at a time.' Unlike a planner-driven whole-case run, the analyst picks; covered
+    nodes are NOT skipped (an explicit pick overrides any skip). Dedupes + caps the set."""
     seen, clean = set(), []
     for t in targets:
         t = (t or "").strip()
@@ -383,7 +343,7 @@ def investigate_selected(conn, case: str | None, targets: list[str],
         if on_event:
             on_event("no targets selected")
         return {"ok": True, "case": case, "targets": 0, "note": "no targets selected"}
-    # Emit the same marker investigate_case uses so the live progress bar shows
+    # Emit the same "picked N" marker the live progress bar parses so it shows
     # targets_total (parsed by the web job's _update_progress).
     if on_event:
         on_event(f"picked {len(clean)} target(s): {', '.join(clean)}")
@@ -419,6 +379,74 @@ def _uninvestigated_targets(conn, case: str | None, seen: set[str],
     return [t for t in _targets(conn, case, limit) if t.lower() not in seen]
 
 
+def _historical_per_target(conn) -> tuple[float | None, str]:
+    """Average real $/target from past agent runs, for a data-grounded point estimate.
+    Returns (avg, basis): (avg, 'historical') when there's prior agent spend to learn from,
+    else (None, 'cold-start')."""
+    try:
+        row = conn.execute(
+            "SELECT AVG(cost_usd) FROM enrichment_runs "
+            "WHERE provider_slug = 'agent' AND cost_usd IS NOT NULL AND cost_usd > 0"
+        ).fetchone()
+    except Exception:
+        return None, "cold-start"
+    avg = row[0] if row else None
+    return (float(avg), "historical") if avg else (None, "cold-start")
+
+
+def _historical_seconds_per_target(conn) -> tuple[float | None, str]:
+    """Average real wall-clock SECONDS/target from past agent runs — the time sibling of
+    `_historical_per_target`, used to ground a live ETA on the run card. Each agent
+    `enrichment_runs` row is per-target (one `entity_id` per investigation call, see
+    `investigator.add_findings`), so AVG(elapsed) IS per-target — no normalization needed.
+
+    Filters `finished_at > started_at` to drop legacy cost-blind rows where `started_at`
+    fell back to CURRENT_TIMESTAMP (==finished_at, elapsed 0), exactly as the $ sibling
+    filters `cost_usd > 0`. Returns (avg_secs, basis): ('historical') when there's prior
+    timed spend to learn from, else (None, 'cold-start') so the caller shows no ETA rather
+    than a fabricated one."""
+    try:
+        row = conn.execute(
+            "SELECT AVG(strftime('%s', finished_at) - strftime('%s', started_at)) "
+            "FROM enrichment_runs "
+            "WHERE provider_slug = 'agent' AND started_at IS NOT NULL "
+            "AND finished_at > started_at"
+        ).fetchone()
+    except Exception:
+        return None, "cold-start"
+    avg = row[0] if row else None
+    return (float(avg), "historical") if avg else (None, "cold-start")
+
+
+def estimate_run(conn, case: str | None, deep: bool = True, *,
+                 budget: int = DEEP_ENTITY_BUDGET, limit: int = DEFAULT_LIMIT,
+                 cost_cap: float = DEEP_COST_CAP_USD) -> dict:
+    """SINGLE source of truth for a run's pre-launch cost estimate. deep_investigate's own
+    post-launch 'plan' line calls this too, so the before-run line and the during-run line
+    can never contradict (cost transparency — the founder sees the bill before committing,
+    not a surprise after).
+
+    Returns a POINT estimate (`est_typical_usd`) — the expected spend, grounded in the
+    historical average $/target when available — plus `cost_cap_usd` (the hard ceiling that
+    bounds the worst case) and `basis` (how the typical was derived). NEVER used to block a
+    run (cost-model-budget-the-scope rule); it's informational only.
+
+    deep=False (one-hop expand): a fixed tiny estimate (free infra belt + one suggest call)."""
+    if not deep:
+        return {"deep": False, "est_targets": 1,
+                "est_typical_usd": round(EST_COST_PER_ONE_HOP, 4),
+                "cost_cap_usd": None, "basis": "one-hop-fixed"}
+    # Same cap→target-budget math deep_investigate uses, so est_targets matches the run.
+    eff_budget = budget
+    if cost_cap:
+        eff_budget = min(budget, max(1, int(cost_cap / max(EST_COST_PER_TARGET, 0.1))))
+    avg, basis = _historical_per_target(conn)
+    per_target = avg if avg else EST_COST_PER_TARGET
+    return {"deep": True, "est_targets": eff_budget,
+            "est_typical_usd": round(eff_budget * per_target, 2),
+            "cost_cap_usd": cost_cap, "basis": basis}
+
+
 def deep_investigate(conn, case: str | None, max_turns: int = DEEP_TURNS,
                      concurrency: int = DEFAULT_CONCURRENCY,
                      limit: int = DEFAULT_LIMIT, rounds: int = MAX_ROUNDS,
@@ -438,15 +466,15 @@ def deep_investigate(conn, case: str | None, max_turns: int = DEEP_TURNS,
     # Turn the DOLLAR cap into a TARGET budget up front so the run commits to a scope it
     # can finish — instead of running blind and getting axed mid-investigation. The cost
     # is then predictable (≈ targets × per-target) and the run always completes its plan.
-    eff_budget = budget
-    if cost_cap:
-        eff_budget = min(budget, max(1, int(cost_cap / max(EST_COST_PER_TARGET, 0.1))))
+    # Use the SHARED estimator so this run's scope + the pre-run estimate line are identical
+    # (no before/after drift). est_targets is the cost-derived target budget.
+    est = estimate_run(conn, case, deep=True, budget=budget, limit=limit, cost_cap=cost_cap)
+    eff_budget = est["est_targets"]
     targets, _plan = plan_investigation(conn, case, limit)
     if on_event:
         # Tell the analyst the scope AND the dollar estimate up front (cost
         # transparency — they see the bill before a deep run, not after).
-        est = eff_budget * EST_COST_PER_TARGET
-        on_event(f"plan: up to {eff_budget} targets this run (est ~${est:.2f})")
+        on_event(f"plan: up to {eff_budget} targets this run (est ~${est['est_typical_usd']:.2f})")
     stop = "exhausted"
     for rnd in range(rounds):
         # Take only as many fresh targets as the (cost-derived) budget allows. We finish

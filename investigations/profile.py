@@ -17,7 +17,6 @@ Write to vault/profiles/<entity>.md.
 import re
 from pathlib import Path
 
-from investigations.storage import db
 from investigations.llm import client as llm
 
 SAFE_NAME_RE = re.compile(r"[^\w.-]+")
@@ -241,38 +240,6 @@ def _get_enrichment_links(conn, entity_id: int) -> list[dict]:
         return []
     return [{"label": r["label"], "url": r["url"]} for r in rows]
 
-
-def regenerate_dossier_links(conn, vault_dir: Path) -> int:
-    """Walk existing profile MD files and append pivot links if missing."""
-    profiles_dir = vault_dir / "profiles"
-    if not profiles_dir.exists():
-        return 0
-    updated = 0
-    name_to_id = {r["canonical_name"]: r["id"] for r in conn.execute(
-        "SELECT id, canonical_name FROM entities"
-    ).fetchall()}
-    for p in profiles_dir.glob("*.md"):
-        content = p.read_text(encoding="utf-8")
-        if "## Pivot for enrichment" in content:
-            continue
-        first_line = content.split("\n# ")[1].split("\n")[0] if "\n# " in content else ""
-        entity_id = name_to_id.get(first_line.strip())
-        if not entity_id:
-            continue
-        links = _get_enrichment_links(conn, entity_id)
-        if not links:
-            continue
-        if "\n---\n## Linked entities" in content:
-            insert = "\n---\n## Pivot for enrichment\n" + "\n".join(
-                f"- [{l['label']}]({l['url']})" for l in links
-            ) + "\n"
-            content = content.replace(
-                "\n---\n## Linked entities", insert + "\n---\n## Linked entities",
-                1,
-            )
-            p.write_text(content, encoding="utf-8")
-            updated += 1
-    return updated
 
 
 def run(conn, vault_dir: Path, roles: set[str] = None, case: str | None = None) -> dict:

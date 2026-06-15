@@ -18,10 +18,15 @@ import pytest
 from investigations.llm import client as llm
 
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="no ANTHROPIC_API_KEY — API path dormant, CLI fallback in use",
-)
+# Real-API test: marked `live` so CI / keyless runs auto-skip it (conftest), and it still
+# self-skips without a key. Opt in with --run-live or ANTHROPIC_API_KEY.
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not os.environ.get("ANTHROPIC_API_KEY"),
+        reason="no ANTHROPIC_API_KEY — API path dormant, CLI fallback in use",
+    ),
+]
 
 SYSTEM = "You classify words. Return JSON only."
 PROMPT = ('Classify each as fruit or tool: ["apple","hammer","pear"]. '

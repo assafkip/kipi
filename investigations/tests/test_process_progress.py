@@ -16,8 +16,9 @@ def test_step_keys_match_pipeline():
     # The progress manifest keys must match the _step() names the pipeline calls,
     # or the bar would show steps that never move. Guard against drift.
     keys = {k for k, _ in app_module.PROCESS_STEPS}
-    expected = {"reextract", "consolidate", "typing", "correlate",
-                "cross_domain", "analyze", "graph_metrics", "synthesize", "dossiers"}
+    expected = {"reextract", "retro_clean", "consolidate", "typing", "correlate",
+                "cross_domain", "analyze", "score", "graph_metrics", "synthesize",
+                "dossiers"}
     _check("PROCESS_STEPS keys match the pipeline steps", keys == expected)
 
 

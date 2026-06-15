@@ -49,6 +49,7 @@ def test_analyst_override_supersedes_report_claim():
         with db.connect(dbp) as conn:
             rid = db.insert_report(conn, "r.md", "h1", "markdown", "R", "cx", "body")
             e = db.upsert_entity(conn, "@suspect", "handle", rid)
+            db.add_mention(conn, e, rid, "@suspect", "ctx")  # mentions ARE case scope
             # A report-derived role claim, projected to the entity's derived role.
             conn.execute(
                 "INSERT INTO claims (entity_id, report_id, claim_type, predicate, value, "
@@ -56,7 +57,10 @@ def test_analyst_override_supersedes_report_claim():
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (e, rid, "role", "role", "operator", "med", "from report", "active", "report"))
             conn.commit()
-            claims._project_active(conn, e, "role")
+            # _project_active was replaced by the projection layer (sp3):
+            # project(case) replays the authoritative claim onto the graph.
+            from investigations import projection
+            projection.project(conn, "cx")
             notes0 = conn.execute("SELECT notes FROM entities WHERE id=?", (e,)).fetchone()["notes"]
             _check("report claim projected role:operator", (notes0 or "").startswith("role:operator"))
 

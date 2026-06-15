@@ -123,19 +123,32 @@ def _node_delta(conn, eid: int) -> dict:
     }}
 
 
+def _store_actor(actor: str) -> str:
+    """graph_chat's two actor words mapped to the store vocabulary: the human
+    router is the analyst (top authority — store skips the value gate); the
+    warm session's graph tools are the agent (gated like every creation path)."""
+    return "analyst:graph-chat" if actor == "analyst" else "agent"
+
+
 def execute(conn, intent: str, args: dict, case: str | None,
-            selected_name: str | None) -> dict:
-    """Run the parsed command. Returns {reply, deltas}."""
+            selected_name: str | None, actor: str = "analyst") -> dict:
+    """Run the parsed command. Returns {reply, deltas}.
+
+    `actor` is WHO is acting: "analyst" (the human chat router — top authority, their
+    adds are never gated and land with analyst provenance) or "agent" (the warm
+    session's kipi-graph MCP tools — a graph-CREATION path, so add_node must clear
+    the same admission gate as every other path, and writes provenance 'osint',
+    never 'analyst')."""
     from investigations.enrich.promote import _classify, _enrichment_report
     from investigations.storage import db
+    from investigations import store
+    prov = "analyst" if actor == "analyst" else "osint"
 
     def tgt(key="target"):
         v = args.get(key)
         if v and str(v).lower() in ("this", "it", "selected", "the selected node"):
             return selected_name
         return v
-
-    deltas: dict = {}
 
     if intent == "detail":
         eid, name = _resolve(conn, tgt(), case)
@@ -250,7 +263,14 @@ def execute(conn, intent: str, args: dict, case: str | None,
                     "deltas": {}}
         rep = _enrichment_report(conn, case)
         etype = (args.get("node_type") or _classify(name) or "other")
-        eid = db.upsert_entity(conn, name, etype, rep)
+        # The store carries the admission gate: the agent's graph_add_node is a
+        # creation path (gated, RCA rca-recurring-graph-noise); the ANALYST's own
+        # add is never gated — analyst is top authority (store actor policy).
+        res = store.apply_mutation(conn, store.entity_upserted(
+            case, name, etype, rep, actor=_store_actor(actor), provenance=prov))
+        if not res["applied"]:
+            return {"reply": f"Not adding '{name[:60]}': {res['reason']}", "deltas": {}}
+        eid = res["entity_id"]
         db.add_mention(conn, eid, rep, name, "added via graph chat")
         delta = {"add_nodes": [_node_delta(conn, eid)], "add_edges": []}
         link = tgt("link_to")
@@ -260,8 +280,9 @@ def execute(conn, intent: str, args: dict, case: str | None,
                 # Controlled vocabulary binds the analyst-driven edge too (issue rel-vocab-validator).
                 rel = normalize_rel(args.get("rel_type"), "graph chat") or "linked_to"
                 db.add_relationship(conn, lid, eid, rel, rep, "added via graph chat", 0.6)
-                db.upsert_typed_relationship(conn, lid, eid, rel,
-                                             evidence="graph chat", provenance="analyst")
+                store.apply_mutation(conn, store.edge_upserted(
+                    case, lid, eid, rel, actor=_store_actor(actor),
+                    evidence="graph chat", provenance=prov))
                 delta["add_edges"].append({"data": {
                     "id": f"e{lid}-{eid}-{rel}", "source": str(lid), "target": str(eid),
                     "rel_type": rel, "confidence": "medium"}})
@@ -277,8 +298,9 @@ def execute(conn, intent: str, args: dict, case: str | None,
         rel = normalize_rel(args.get("rel_type"), "graph chat") or "linked_to"
         rep = _enrichment_report(conn, case)
         db.add_relationship(conn, sid, did, rel, rep, "added via graph chat", 0.6)
-        db.upsert_typed_relationship(conn, sid, did, rel,
-                                     evidence="graph chat", provenance="analyst")
+        store.apply_mutation(conn, store.edge_upserted(
+            case, sid, did, rel, actor=_store_actor(actor),
+            evidence="graph chat", provenance=prov))
         conn.commit()
         return {"reply": f"Connected {sname} → {rel} → {dname}.",
                 "deltas": {"add_edges": [{"data": {
@@ -289,7 +311,10 @@ def execute(conn, intent: str, args: dict, case: str | None,
         eid, name = _resolve(conn, tgt(), case)
         if not eid:
             return {"reply": f"I couldn't find '{tgt()}' to hide.", "deltas": {}}
-        conn.execute("UPDATE entities SET hidden = 1 WHERE id = ?", (eid,))
+        res = store.apply_mutation(conn, store.entity_hidden(
+            case, eid, actor=_store_actor(actor)))
+        if not res["applied"]:
+            return {"reply": f"Couldn't hide {name}: {res['reason']}", "deltas": {}}
         conn.commit()
         return {"reply": f"Hid {name}. It's reversible — say 'unhide {name}' or click Undo.",
                 "deltas": {"hide_ids": [str(eid)], "undo": {"op": "unhide", "id": eid, "name": name}}}
@@ -298,7 +323,10 @@ def execute(conn, intent: str, args: dict, case: str | None,
         eid, name = _resolve(conn, tgt(), case)
         if not eid:
             return {"reply": f"I couldn't find '{tgt()}'.", "deltas": {}}
-        conn.execute("UPDATE entities SET hidden = 0 WHERE id = ?", (eid,))
+        res = store.apply_mutation(conn, store.entity_unhidden(
+            case, eid, actor=_store_actor(actor)))
+        if not res["applied"]:
+            return {"reply": f"Couldn't restore {name}: {res['reason']}", "deltas": {}}
         conn.commit()
         return {"reply": f"Restored {name}.", "deltas": {"add_nodes": [_node_delta(conn, eid)],
                                                           "focus_id": str(eid)}}

@@ -330,6 +330,47 @@ def _migrate(conn) -> None:
         )
     """)
 
+    # Evidence artifacts (PRD evidence-artifacts, ea-1): a POINT-IN-TIME capture of
+    # the raw provider/tool response that grounds a node, so the proof survives the
+    # live source dying (a scam domain's WHOIS/page is gone the day after takedown).
+    # content_hash makes capture idempotent; captured_at stamps collection time.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            source_url TEXT,
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_id, content_hash),
+            FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_entity "
+                 "ON evidence_artifacts(entity_id)")
+
+    # Hypothesis-stance tags on typed edges (PRD evidence-artifacts, ea-2): an
+    # analyst annotation recording WHICH competing hypothesis an edge supports /
+    # contradicts / is merely consistent-with — graph-side ACH. A separate table,
+    # never mutating the edge's own rel_type/confidence; the edge stands on its
+    # evidence. FK to typed_relationships(id), cascade so a dropped edge's tags go.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hypothesis_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            edge_id INTEGER NOT NULL,
+            hypothesis TEXT NOT NULL,
+            stance TEXT NOT NULL,
+            author TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(edge_id, hypothesis, author),
+            FOREIGN KEY (edge_id) REFERENCES typed_relationships(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hypothesis_edge "
+                 "ON hypothesis_tags(edge_id)")
+
     # Per-case adaptive ontology. The "Understand" step proposes an entity/role
     # schema fit to THIS case's domain (crypto-fraud needs wallet/promoter, not
     # operator/channel); the analyst approves it before classification runs.
@@ -346,75 +387,94 @@ def _migrate(conn) -> None:
         )
     """)
 
-    # Seed provider catalog (idempotent — INSERT OR IGNORE on unique slug)
-    providers_seed = [
-        ("perplexity", "Perplexity Sonar / Deep / Reasoning", "search", "PERPLEXITY_API_KEY",
-         "AI answers with citations. Best first-pass for who/what questions.", 0.005,
-         "https://docs.perplexity.ai/"),
-        ("tavily", "Tavily Search + Extract", "search", "TAVILY_API_KEY",
-         "Agent-optimized search. Cheap basic mode, deeper advanced mode.", 0.005,
-         "https://docs.tavily.com/"),
-        ("exa", "Exa AI semantic search", "search", "EXA_API_KEY",
-         "Semantic search + company/people endpoints. Long-form deep research.", 0.005,
-         "https://docs.exa.ai/"),
-        ("apify", "Apify Actors (LinkedIn, IG, Telegram, Twitter, +50)", "scrape", "APIFY_API_TOKEN",
-         "Run 55+ ready-made scrapers. Pay per actor run.", 0.10,
-         "https://docs.apify.com/"),
-        ("jina", "Jina Reader / Search / Deepsearch", "reader", "JINA_API_KEY",
-         "Convert any URL to clean markdown. Search + deepsearch endpoints.", 0.001,
-         "https://jina.ai/reader/"),
-        # Threat-intel + infra recon, ported from huntkit's MCP servers.
-        ("virustotal", "VirusTotal (domain / IP / hash / URL)", "reputation", "VIRUSTOTAL_API_KEY",
-         "Reputation + detection stats for a domain, IP, file hash, or URL. Free: 4/min, 500/day.",
-         0.0, "https://www.virustotal.com/gui/join-us"),
-        ("abusech", "abuse.ch — URLhaus + ThreatFox", "reputation", "ABUSECH_AUTH_KEY",
-         "Is a host/URL a known malware point (URLhaus) or a known IOC (ThreatFox)?",
-         0.0, "https://auth.abuse.ch/"),
-        ("crtsh", "crt.sh certificate transparency", "infra", None,
-         "Enumerate subdomains + related hosts from certificate transparency logs. Keyless.",
-         0.0, "https://crt.sh/"),
-        ("infra", "Infra recon (WHOIS / DNS / reverse-DNS)", "infra", None,
-         "WHOIS registration, DNS records, and reverse DNS via local whois + dig. Keyless.",
-         0.0, "https://en.wikipedia.org/wiki/WHOIS"),
-        ("shodan", "Shodan (host ports / services / CVEs)", "infra", "SHODAN_API_KEY",
-         "Open ports, running services + banners, hostnames, and known CVEs for an IP. "
-         "Works keyless (InternetDB); add a key for banners + org/ASN.",
-         0.0, "https://account.shodan.io/"),
-        ("censys", "Censys (host services / ports / certs)", "infra", "CENSYS_PLATFORM_TOKEN",
-         "Services, ports, TLS/cert data, ASN, and DNS names for an IP. Platform: enter "
-         "'PAT:ORGID' (token + Org ID from the console URL). Legacy: enter 'ID:SECRET'.",
-         0.0, "https://platform.censys.io/settings/api"),
-        ("whoisxml", "WhoisXML (reverse-whois / DNS history)", "infra", "WHOISXML_API_KEY",
-         "Sibling domains by registrant (reverse-whois) and historical DNS resolutions. "
-         "Keyed: WHOISXML_API_KEY.",
-         0.0, "https://www.whoisxmlapi.com/"),
-        # Flowsint-inspired enrichers (native to kipi, no Flowsint dependency).
-        ("gravatar", "Gravatar (email -> profile + linked accounts)", "social", None,
-         "An email's public Gravatar profile + the social accounts the owner linked. Keyless.",
-         0.0, "https://docs.gravatar.com/api/profiles/"),
-        ("ipgeo", "IP geolocation + ASN (ip-api)", "infra", None,
-         "Geolocation, ISP, org, and autonomous system (ASN) for an IP or domain. Keyless.",
-         0.0, "https://ip-api.com/docs"),
-        ("username", "Username presence sweep (curated platforms)", "social", None,
-         "Which curated platforms a handle exists on (GitHub, Reddit, Keybase, Telegram, "
-         "YouTube, +). Keyless; bot-walled sites omitted.",
-         0.0, "https://github.com/reconurge/flowsint"),
-        ("wallet", "Crypto wallet (BTC keyless / ETH via Etherscan)", "chain", None,
-         "Balance + transaction counterparties for a BTC (mempool.space, keyless) or ETH "
-         "(Etherscan, free ETHERSCAN_API_KEY) address.",
-         0.0, "https://etherscan.io/apis"),
-        ("email", "Email intel (triage + header->IP)", "infra", None,
-         "user@domain -> MX/SPF/DMARC posture, mail provider, disposable flag; "
-         "mode=headers: raw headers -> Received hop chain + public source IPs "
-         "feeding the dns/RDAP/VT pivots. Keyless (dnspython).",
-         0.0, "https://www.rfc-editor.org/rfc/rfc7208"),
-    ]
-    for slug, name, cat, env, desc, cost, docs in providers_seed:
+    # Seed provider catalog FROM THE ADAPTER REGISTRY: the registry is the
+    # single source of truth for which providers exist (issue
+    # enrich-seed-from-registry). The old hand-maintained list drifted - 18
+    # registry adapters (phone, ofac, opencorporates, ...) had no
+    # osint_providers row, so enrichment_runs' FK on provider_slug threw
+    # IntegrityError, surfaced to the graph as a 500 / "Could not reach the
+    # server." Deriving the seed from the registry makes that gap structurally
+    # impossible: every registered adapter is seeded by construction.
+    #
+    # Keyed by the registry KEY (the identifier start_run + transform recipes
+    # dispatch on), NOT adapter.slug - a future key/slug divergence must not
+    # reopen the FK gap (the key==slug invariant is guarded in
+    # test_enrich_adapters). display_name / category / env_var / cost come from
+    # the adapter; the two columns the Adapter class does not carry
+    # (description, docs_url) come from the curated overlay below (NULL when a
+    # slug is absent). INSERT OR IGNORE backfills stale DBs on every connect
+    # WITHOUT touching existing rows (an existing row keeps its api_key +
+    # curated copy). Local import (not module-top): db must not hard-depend on
+    # the enrich package at import time, and the import cost belongs on the
+    # migrate path only.
+    from investigations.enrich.registry import _REGISTRY
+
+    # Curated long-form copy the Adapter class does not expose:
+    # slug -> (description, docs_url). Optional - a registry slug missing here is
+    # still seeded (description/docs_url = NULL), so a new adapter can never
+    # FK-fail for lack of an entry here.
+    provider_meta = {
+        "perplexity": ("AI answers with citations. Best first-pass for who/what questions.",
+                       "https://docs.perplexity.ai/"),
+        "tavily": ("Agent-optimized search. Cheap basic mode, deeper advanced mode.",
+                   "https://docs.tavily.com/"),
+        "exa": ("Semantic search + company/people endpoints. Long-form deep research.",
+                "https://docs.exa.ai/"),
+        "apify": ("Run 55+ ready-made scrapers. Pay per actor run.",
+                  "https://docs.apify.com/"),
+        "jina": ("Convert any URL to clean markdown. Search + deepsearch endpoints.",
+                 "https://jina.ai/reader/"),
+        "virustotal": ("Reputation + detection stats for a domain, IP, file hash, or URL. "
+                       "Free: 4/min, 500/day.", "https://www.virustotal.com/gui/join-us"),
+        "abusech": ("Is a host/URL a known malware point (URLhaus) or a known IOC (ThreatFox)?",
+                    "https://auth.abuse.ch/"),
+        "crtsh": ("Enumerate subdomains + related hosts from certificate transparency logs. "
+                  "Keyless.", "https://crt.sh/"),
+        "infra": ("WHOIS registration, DNS records, and reverse DNS via local whois + dig. "
+                  "Keyless.", "https://en.wikipedia.org/wiki/WHOIS"),
+        "shodan": ("Open ports, running services + banners, hostnames, and known CVEs for an "
+                   "IP. Works keyless (InternetDB); add a key for banners + org/ASN.",
+                   "https://account.shodan.io/"),
+        "censys": ("Services, ports, TLS/cert data, ASN, and DNS names for an IP. Platform: "
+                   "enter 'PAT:ORGID' (token + Org ID from the console URL). Legacy: enter "
+                   "'ID:SECRET'.", "https://platform.censys.io/settings/api"),
+        "abuseipdb": ("Abuse-confidence score, total reports, usage type, ISP, country, and "
+                      "reported domains/hostnames for an IP. Free tier: 1,000 checks/day.",
+                      "https://www.abuseipdb.com/account/api"),
+        "urlscan": ("The domains + IPs urlscan has already observed for a domain/host/IP - a "
+                    "related-infrastructure pivot. Works keyless (rate-limited); add a key for "
+                    "higher quota.", "https://urlscan.io/user/profile/"),
+        "otx": ("Threat-pulse context (campaigns, tags, malware) + passive DNS (related "
+                "domains/IPs) for a domain/IP/URL/hash. Type auto-detected. Free with an API "
+                "key.", "https://otx.alienvault.com/api"),
+        "hibp": ("An email -> which breaches it appears in (needs a key, ~$3.95/mo); a domain "
+                 "-> breaches recorded against that site (public catalog).",
+                 "https://haveibeenpwned.com/API/Key"),
+        "whoisxml": ("Sibling domains by registrant (reverse-whois) and historical DNS "
+                     "resolutions. Keyed: WHOISXML_API_KEY.", "https://www.whoisxmlapi.com/"),
+        "gravatar": ("An email's public Gravatar profile + the social accounts the owner "
+                     "linked. Keyless.", "https://docs.gravatar.com/api/profiles/"),
+        "ipgeo": ("Geolocation, ISP, org, and autonomous system (ASN) for an IP or domain. "
+                  "Keyless.", "https://ip-api.com/docs"),
+        "username": ("Which curated platforms a handle exists on (GitHub, Reddit, Keybase, "
+                     "Telegram, YouTube, +). Keyless; bot-walled sites omitted.",
+                     "https://github.com/reconurge/flowsint"),
+        "wallet": ("Balance + transaction counterparties for a BTC (mempool.space, keyless) "
+                   "or ETH (Etherscan, free ETHERSCAN_API_KEY) address.",
+                   "https://etherscan.io/apis"),
+        "email": ("user@domain -> MX/SPF/DMARC posture, mail provider, disposable flag; "
+                  "mode=headers: raw headers -> Received hop chain + public source IPs feeding "
+                  "the dns/RDAP/VT pivots. Keyless (dnspython).",
+                  "https://www.rfc-editor.org/rfc/rfc7208"),
+    }
+    for slug, adapter in _REGISTRY.items():
+        desc, docs = provider_meta.get(slug, (None, None))
         conn.execute(
             "INSERT OR IGNORE INTO osint_providers "
             "(slug, display_name, category, env_var, description, cost_estimate_usd, docs_url) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (slug, name, cat, env, desc, cost, docs),
+            (slug, adapter.display_name or slug, adapter.category, adapter.env_var,
+             desc, adapter.cost_per_call_usd, docs),
         )
 
     _backfill_investigations(conn)
@@ -437,6 +497,14 @@ def _migrate(conn) -> None:
     # investigator (_case_thesis), and frames the synthesis brief. One per case.
     if "objective" not in inv_cols:
         conn.execute("ALTER TABLE investigations ADD COLUMN objective TEXT")
+
+    # Case change version — the /api/changed staleness signal, DB-backed so CLI
+    # and pipeline writers refresh open views (the webapp's old in-memory dict
+    # could not). Bumped ONLY by store.bump_case inside apply_mutation's
+    # transaction (sp1-store-apply-mutation).
+    if "version" not in inv_cols:
+        conn.execute(
+            "ALTER TABLE investigations ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
 
     # Heterogeneous evidence: a CSV/dataset is not a prose report. evidence_kind
     # tags what a row IS; parent_report_id links dataset child-records to their
@@ -465,6 +533,23 @@ def _migrate(conn) -> None:
     """)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_turns_case ON chat_turns(investigation, id)")
+
+    # Tradecraft gates run from the chat (see investigations/tradecraft.py). A step is
+    # "done" when its row exists — code-enforced, surfaced as a checklist + a soft brief
+    # nudge. One current artifact per (case, step).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS case_tradecraft (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            investigation TEXT NOT NULL,
+            step TEXT NOT NULL,
+            content TEXT,
+            analyst TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(investigation, step)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tradecraft_case ON case_tradecraft(investigation)")
 
 
 INVESTIGATIONS_DDL = """
@@ -617,14 +702,6 @@ def add_mention(conn, entity_id: int, report_id: int, surface_form: str,
     )
 
 
-def asset_entities(conn, asset_id: int):
-    return conn.execute(
-        "SELECT DISTINCT e.id, e.canonical_name, e.entity_type "
-        "FROM mentions m JOIN entities e ON e.id = m.entity_id "
-        "WHERE m.asset_id = ? ORDER BY e.entity_type, e.canonical_name",
-        (asset_id,),
-    ).fetchall()
-
 
 def add_relationship(conn, src_id: int, dst_id: int, rel_type: str,
                      report_id: int | None, evidence: str | None,
@@ -715,14 +792,6 @@ def entity_connections(conn, entity_id: int):
     ).fetchall()
 
 
-def all_entities(conn):
-    return conn.execute("SELECT * FROM entities ORDER BY entity_type, canonical_name").fetchall()
-
-
-def all_reports(conn):
-    return conn.execute("SELECT * FROM reports ORDER BY ingested_at").fetchall()
-
-
 def add_asset(conn, report_id: int, file_path: str, source_kind: str,
               page_number: int | None = None, image_index: int | None = None,
               ocr_text: str | None = None) -> int:
@@ -738,14 +807,6 @@ def add_asset(conn, report_id: int, file_path: str, source_kind: str,
         (report_id, file_path),
     ).fetchone()
     return row["id"]
-
-
-def report_assets(conn, report_id: int):
-    return conn.execute(
-        "SELECT * FROM assets WHERE report_id = ? "
-        "ORDER BY page_number, image_index",
-        (report_id,),
-    ).fetchall()
 
 
 def delete_report(conn, report_id: int) -> dict:

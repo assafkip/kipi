@@ -1,6 +1,6 @@
 """PRD-12 guard: the runtime must carry NO single-machine assumptions.
 
-A hardcoded user-home path (`CLAUDE_BIN = "/Users/<name>/.local/bin/claude"`)
+A hardcoded user-home path (`CLAUDE_BIN = "/Users/example/.local/bin/claude"`)
 broke the tool the instant it left this Mac — invisible until Docker. This test greps
 the shipped runtime and FAILS on any hardcoded `/Users/<name>` or `/home/<name>` literal,
 so the next one can't sneak in and only surface at distribution time.

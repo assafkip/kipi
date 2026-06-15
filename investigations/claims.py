@@ -13,9 +13,17 @@ ever deleted, so you can always show the client why the picture changed.
 """
 from __future__ import annotations
 
-import json
 
-from investigations.storage import db
+from investigations import store
+
+
+def _case_of(conn, entity_id) -> str | None:
+    """The case an entity's events belong to (mentions -> reports.investigation),
+    so claim decisions log + bump in the right case."""
+    if not entity_id:
+        return None
+    from investigations.enrich.promote import _primary_case
+    return _primary_case(conn, entity_id)
 from investigations.llm import client as llm
 from investigations.enrich.rel_vocab import normalize_rel
 
@@ -151,9 +159,6 @@ def detect_contradictions(conn, case: str | None = None) -> list[dict]:
     return out
 
 
-def list_contradictions(conn, case=None):
-    return detect_contradictions(conn, case)
-
 
 def count_contradictions(conn, case=None) -> int:
     """Cheap count of contradiction groups (for the nav badge)."""
@@ -184,19 +189,18 @@ def resolve(conn, winning_claim_id: int) -> dict:
     w = conn.execute("SELECT * FROM claims WHERE id = ?", (winning_claim_id,)).fetchone()
     if not w:
         return {"error": "claim not found"}
-    now = _now(conn)
-    conn.execute(  # ensure the winner is active even if it was previously retired
-        "UPDATE claims SET status='active', superseded_by=NULL, resolved_at=? WHERE id=?",
-        (now, winning_claim_id))
     losers = conn.execute(
         "SELECT id FROM claims WHERE entity_id = ? AND predicate = ? AND status = 'active' "
         "AND id != ?", (w["entity_id"], w["predicate"], winning_claim_id)).fetchall()
-    for l in losers:
-        conn.execute(
-            "UPDATE claims SET status='superseded', superseded_by=?, resolved_at=? WHERE id=?",
-            (winning_claim_id, now, l["id"]))
-    _project(conn, dict(w))
-    _recompute_scores(conn)
+    case = _case_of(conn, w["entity_id"])
+    store.apply_mutation(conn, store.claim_resolved(
+        case, winning_claim_id, actor="analyst",
+        superseded_ids=[l["id"] for l in losers]))
+    # FULL projection: the override propagates to graph + brief inputs +
+    # scores in ONE step (prd-05). Same connection; commit only after
+    # project() returns — a projection failure rolls the whole decision back.
+    from investigations import projection
+    projection.project(conn, case)
     conn.commit()
     return {"ok": True, "superseded": len(losers)}
 
@@ -240,7 +244,9 @@ def assert_claim(conn, entity_id: int, *, claim_type: str, predicate: str,
             "VALUES (?, NULL, ?, ?, ?, ?, 'analyst', ?, 'active', 'manual', ?)",
             (entity_id, claim_type, pred, val, object_entity_id, rationale, analyst))
         claim_id = cur.lastrowid
-    conn.commit()
+    # NO commit here: resolve() commits only after projection returns, so the
+    # whole override (manual claim + supersessions + projection) is one
+    # transaction — a projection failure leaves nothing half-applied (codex).
     result = resolve(conn, claim_id)   # authoritative + supersede + project + rescore
     result["claim_id"] = claim_id
     result["asserted"] = {"predicate": pred, "value": val, "by": analyst}
@@ -252,39 +258,47 @@ def reject(conn, claim_id: int) -> dict:
     c = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
     if not c:
         return {"error": "claim not found"}
-    conn.execute("UPDATE claims SET status='rejected', resolved_at=? WHERE id=?",
-                 (_now(conn), claim_id))
-    _project_active(conn, c["entity_id"], c["predicate"])
-    _recompute_scores(conn)
+    case = _case_of(conn, c["entity_id"])
+    store.apply_mutation(conn, store.claim_rejected(
+        case, claim_id, actor="analyst"))
+    # Retire the derived edge when NO active claim remains for a rel slot
+    # (replay only re-applies surviving authority; it cannot retire an edge
+    # whose every claim is gone) — then FULL projection propagates the
+    # rejection to graph + brief inputs + scores in one step (prd-05).
+    _retire_if_claimless(conn, c["entity_id"], c["predicate"])
+    from investigations import projection
+    projection.project(conn, case)
     conn.commit()
     return {"ok": True}
 
 
-def _project_active(conn, entity_id, predicate) -> None:
-    """Reproject the derived graph from the current authoritative active claim
-    (latest report wins). If none remains active, retire the derived edge."""
+def _retire_if_claimless(conn, entity_id, predicate) -> None:
+    """Clear a derived slot when NO active claim remains for it — the one
+    rejection outcome replay can't produce (replay re-applies surviving
+    authority; an all-claims-gone slot has none). rel: edges retire;
+    role/sub_role notes clear. (The old _project_active silently left stale
+    role notes in place — prd-05 demands gone-from-the-graph.)"""
     row = conn.execute(
-        "SELECT * FROM claims WHERE entity_id=? AND predicate=? AND status='active' "
-        "ORDER BY report_id DESC, id DESC LIMIT 1", (entity_id, predicate)).fetchone()
+        "SELECT 1 FROM claims WHERE entity_id=? AND predicate=? AND status='active' "
+        "LIMIT 1", (entity_id, predicate)).fetchone()
     if row:
-        _project(conn, dict(row))
-    elif predicate.startswith("rel:"):
+        return
+    case = _case_of(conn, entity_id)
+    if predicate.startswith("rel:"):
         try:
             obj = int(predicate.split(":")[1])
-            conn.execute(
-                "UPDATE typed_relationships SET status='superseded' "
-                "WHERE src_entity_id=? AND dst_entity_id=?", (entity_id, obj))
+            store.apply_mutation(conn, store.edge_status_set(
+                case, entity_id, obj, "superseded", actor="analyst"))
         except (ValueError, IndexError):
             pass
-
-
-def _recompute_scores(conn) -> None:
-    """Keep entity_scores.degree honest after the graph changes (deterministic)."""
-    try:
-        from investigations import analyze
-        analyze.compute_threat_scores(conn)
-    except Exception:
-        pass
+    elif predicate == "role":
+        store.apply_mutation(conn, store.analyst_annotated(
+            case, entity_id, {"notes": None, "sub_role": None,
+                              "sub_role_reason": None}, actor="analyst"))
+    elif predicate == "sub_role":
+        store.apply_mutation(conn, store.analyst_annotated(
+            case, entity_id, {"sub_role": None, "sub_role_reason": None},
+            actor="analyst"))
 
 
 def _project(conn, claim) -> None:
@@ -300,16 +314,21 @@ def _project(conn, claim) -> None:
             if cur and cur["notes"] and " — " in cur["notes"]:
                 reason = cur["notes"].split(" — ", 1)[1]
             notes = f"role:{val} — " + (reason or f"corrected (claim {claim['id']})")
-            conn.execute("UPDATE entities SET notes=? WHERE id=?", (notes, eid))
+            store.apply_mutation(conn, store.analyst_annotated(
+                _case_of(conn, eid), eid, {"notes": notes}, actor="analyst"))
         elif val in CANONICAL_SUBROLES:
             # A 'role' claim whose value is really a sub-role — set sub_role, do
             # NOT write a non-canonical role into notes (that would zero the score).
-            conn.execute("UPDATE entities SET sub_role=?, sub_role_reason=? WHERE id=?",
-                         (val, f"corrected (claim {claim['id']})", eid))
+            store.apply_mutation(conn, store.analyst_annotated(
+                _case_of(conn, eid), eid,
+                {"sub_role": val, "sub_role_reason": f"corrected (claim {claim['id']})"},
+                actor="analyst"))
         # else: unknown vocab — keep the claim for audit, leave the derived role alone.
     elif pred == "sub_role":
-        conn.execute("UPDATE entities SET sub_role=?, sub_role_reason=? WHERE id=?",
-                     (val, f"corrected (claim {claim['id']})", eid))
+        store.apply_mutation(conn, store.analyst_annotated(
+            _case_of(conn, eid), eid,
+            {"sub_role": val, "sub_role_reason": f"corrected (claim {claim['id']})"},
+            actor="analyst"))
     elif pred.startswith("rel:") and claim.get("object_entity_id"):
         obj = claim["object_entity_id"]
         # Analyst-authored edge: route through the single vocab gate too, so the analyst
@@ -321,20 +340,20 @@ def _project(conn, claim) -> None:
         rel = normalize_rel(val, claim.get("evidence", ""), allow_novel=True)
         if rel is None:
             return
-        conn.execute(
-            "UPDATE typed_relationships SET status='superseded' "
-            "WHERE src_entity_id=? AND dst_entity_id=? AND rel_type != ?",
-            (eid, obj, rel))
+        store.apply_mutation(conn, store.edge_status_set(
+            _case_of(conn, eid), eid, obj, "superseded", actor="analyst",
+            rel_type_not=rel))
         # The upsert handles both branches: a new edge gets created, an existing one
         # gets its time bounds bumped (the claim IS a re-observation). Reactivation is
         # the one thing the helper deliberately won't do (retired stays retired), so a
         # claim-confirmed edge flips status explicitly after.
-        db.upsert_typed_relationship(
-            conn, eid, obj, rel, confidence="corrected",
-            evidence=claim.get("evidence"), provenance="analyst")
-        conn.execute(
-            "UPDATE typed_relationships SET status='active' "
-            "WHERE src_entity_id=? AND dst_entity_id=? AND rel_type=?", (eid, obj, rel))
+        store.apply_mutation(conn, store.edge_upserted(
+            _case_of(conn, eid), eid, obj, rel, actor="analyst",
+            confidence="corrected", evidence=claim.get("evidence"),
+            provenance="analyst"))
+        store.apply_mutation(conn, store.edge_status_set(
+            _case_of(conn, eid), eid, obj, "active", actor="analyst",
+            rel_type=rel))
     # attribute claims have no derived column — surfaced from the claims layer.
 
 

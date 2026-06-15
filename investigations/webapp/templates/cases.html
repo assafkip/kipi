@@ -124,7 +124,7 @@ function newCase() {
         const r = await fetch('/api/investigation/delete', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.error) { this.delError = d.error; this.deleting = false; return; }
-        window.location.reload();
+        window.kipiNav.refresh();
       } catch (e) {
         this.delError = 'Could not delete the investigation.'; this.deleting = false;
       }
@@ -140,7 +140,7 @@ function newCase() {
         const d = await r.json();
         if (d.error) { this.error = d.error; this.busy = false; return; }
         // Case is created + now active. Land on Reports to add evidence.
-        window.location = '/reports';
+        window.kipiNav.go('/reports');
       } catch (e) {
         this.error = 'Could not create the case.'; this.busy = false;
       }

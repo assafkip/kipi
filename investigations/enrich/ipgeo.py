@@ -55,6 +55,7 @@ def _fetch(ip: str, timeout: int) -> dict:
 
 class IpGeoAdapter(Adapter):
     slug = "ipgeo"
+    watched_types = ('ip', 'domain', 'subdomain')
     display_name = "IP geolocation + ASN (ip-api)"
     env_var = None  # keyless
     category = "infra"

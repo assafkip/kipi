@@ -44,14 +44,17 @@ def test_escape_and_background_click_clear():
     assert "clearPath" in bg
 
 
-def test_path_styles_defined_after_provisional():
+def test_path_styles_defined_last():
     for sel in ("'.path-dim'", "'node.path-highlight'", "'edge.path-highlight'",
                 "'node.path-endpoint'"):
         assert sel in GRAPH, sel
     # Cytoscape applies later matching selectors over earlier ones — the path
-    # styles must come AFTER edge.provisional or a provisional edge on the
-    # found path keeps its provisional look.
-    assert GRAPH.index("'edge.provisional'") < GRAPH.index("'edge.path-highlight'")
+    # styles must come AFTER the other interaction styles so the found path
+    # wins on every shared element. (edge.provisional was deleted with the
+    # rejected overlay design, sp0-graph-cosmetics 2026-06-11.)
+    assert "provisional" not in GRAPH
+    assert GRAPH.index("'edge.selected'") < GRAPH.index("'edge.path-highlight'")
+    assert GRAPH.index("'edge.dimmed'") < GRAPH.index("'edge.path-highlight'")
 
 
 def test_rebuild_clears_path_state():

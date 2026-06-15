@@ -64,11 +64,11 @@ function alertsView() {
     },
     async ack(a) {
       await fetch('/api/alerts/' + a.id + '/ack', { method: 'POST' });
-      location.reload();  // refresh the nav bell count too
+      window.kipiNav.refresh();  // refresh the nav bell count too
     },
     async ackAll() {
       await fetch('/api/alerts/ack-all', { method: 'POST' });
-      location.reload();
+      window.kipiNav.refresh();
     },
   }
 }

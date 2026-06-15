@@ -14,6 +14,7 @@ TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
 
 class TavilyAdapter(Adapter):
     slug = "tavily"
+    watched_types = ("domain", "subdomain", "url", "ip", "email", "phone", "handle", "person", "org", "telegram_channel", "crypto_wallet", "wallet", "asn", "indicator", "username", "fingerprint", "hash_sha256", "hash_md5")  # type-agnostic research tier: full investigable set (deliberate)
     display_name = "Tavily Search + Extract"
     env_var = "TAVILY_API_KEY"
     category = "search"

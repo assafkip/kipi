@@ -95,7 +95,11 @@ def _make_handler(intent: str, case_slug: str):
         try:
             clean = args if isinstance(args, dict) else {}
             with db.connect() as conn:
-                result = graph_chat.execute(conn, intent, clean, case_slug, None)
+                # actor="agent": the warm agent's graph writes clear the admission
+                # gate and land as 'osint' provenance — never 'analyst' (authority
+                # model: only the human chat router writes analyst rows).
+                result = graph_chat.execute(conn, intent, clean, case_slug, None,
+                                            actor="agent")
             return {"content": [{"type": "text",
                                  "text": result.get("reply", "(no result)")}]}
         except Exception as exc:

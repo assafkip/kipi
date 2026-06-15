@@ -1,10 +1,14 @@
-"""WhoisXML adapter — reverse-WHOIS + historical (passive) DNS.
+"""WhoisXML adapter — reverse-WHOIS + historical (passive) DNS + reverse NS.
 
-Fills the two pivots the investigator named but could not call (RCA 2026-06-03):
+Fills the pivots the investigator named but could not call (RCA 2026-06-03;
+reverse_ns added by PRD graph-machinery-activation):
   - reverse_whois: registrant email/term -> the full domain portfolio
                    (Reverse WHOIS API v2, https://reverse-whois.whoisxmlapi.com/api/v2)
   - dns_history:   a (now-dead) domain's historical A-records / resolution history
                    (DNS Chronicle API v1, https://dns-history.whoisxmlapi.com/api/v1)
+  - reverse_ns:    a nameserver -> every domain using it (Reverse NS API v1,
+                   https://reverse-ns.whoisxmlapi.com/api/v1) — the campaign-wide
+                   pivot when a scam cluster shares custom NS (e.g. streetplug.me)
 
 One provider, one key (WHOISXML_API_KEY, or set via the Enrich UI per RULE-104).
 Free credits on signup; a reverse-WHOIS purchase call costs 1 DRS credit.
@@ -16,13 +20,15 @@ makes the pivots actually reach the graph instead of dying in a summary.
 from __future__ import annotations
 
 import json
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 from investigations.enrich.base import Adapter, EnrichmentResult, EnrichmentError
 
 _REVERSE_WHOIS_URL = "https://reverse-whois.whoisxmlapi.com/api/v2"
 _DNS_HISTORY_URL = "https://dns-history.whoisxmlapi.com/api/v1"
+_REVERSE_NS_URL = "https://reverse-ns.whoisxmlapi.com/api/v1"
 
 # Cap per-entity results so a 10k-domain portfolio doesn't flood the run. The header
 # result always reports the true total; the analyst/agent promotes selectively.
@@ -35,6 +41,19 @@ def _post(url: str, payload: dict, timeout: int) -> dict:
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json"})
+    return _send(req, timeout)
+
+
+def _get(url: str, params: dict, timeout: int) -> dict:
+    """GET a WhoisXML endpoint with query params (Reverse NS is GET-only),
+    same error normalization as _post."""
+    qs = urllib.parse.urlencode(params)
+    req = urllib.request.Request(f"{url}?{qs}", method="GET",
+                                 headers={"Accept": "application/json"})
+    return _send(req, timeout)
+
+
+def _send(req: urllib.request.Request, timeout: int) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -60,13 +79,14 @@ def _post(url: str, payload: dict, timeout: int) -> dict:
 
 class WhoisXMLAdapter(Adapter):
     slug = "whoisxml"
+    watched_types = ('email', 'domain', 'subdomain', 'person', 'org')
     display_name = "WhoisXML (reverse-WHOIS / historical DNS)"
     env_var = "WHOISXML_API_KEY"
     category = "infra"
     cost_per_call_usd = 0.0  # free credits on signup; reverse-WHOIS purchase = 1 DRS credit
 
     def modes(self) -> list[str]:
-        return ["auto", "reverse_whois", "dns_history"]
+        return ["auto", "reverse_whois", "dns_history", "reverse_ns"]
 
     def run(self, query: str, mode: str | None = None,
             timeout: int = 60) -> list[EnrichmentResult]:
@@ -82,6 +102,8 @@ class WhoisXMLAdapter(Adapter):
             return self._reverse_whois(key, term, timeout)
         if m == "dns_history":
             return self._dns_history(key, term, timeout)
+        if m == "reverse_ns":
+            return self._reverse_ns(key, term, timeout)
         raise EnrichmentError(f"WhoisXML: unknown mode '{m}'")
 
     # --- reverse WHOIS: registrant term -> domains -------------------------------
@@ -126,6 +148,51 @@ class WhoisXMLAdapter(Adapter):
             result_type="url",
             title=d,
             summary=f"Registered with WHOIS containing '{term}' (reverse-WHOIS pivot).",
+            url=f"http://{d}",
+            confidence="medium") for d in shown]
+        return [header] + items
+
+    # --- Reverse NS: nameserver -> domains using it -------------------------------
+    def _reverse_ns(self, key: str, ns: str, timeout: int) -> list[EnrichmentResult]:
+        ns = ns.replace("https://", "").replace("http://", "").split("/")[0].strip().lower().rstrip(".")
+        # Reverse NS is GET-only (apiKey/ns query params) — POST 4xxes live.
+        data = _get(_REVERSE_NS_URL, {"apiKey": key, "ns": ns,
+                                      "outputFormat": "JSON"}, timeout)
+        # Reverse NS shape: {"size": N, "result": [{"name": "domain.com",
+        #   "first_seen": ts, "last_visit": ts}, ...]} — items may also be bare strings.
+        raw_list = data.get("result") or []
+        domains = []
+        for item in raw_list:
+            if isinstance(item, dict):
+                d = (item.get("name") or "").strip().lower()
+            else:
+                d = str(item).strip().lower()
+            if d:
+                domains.append(d)
+        total = data.get("size", len(domains))
+
+        if not domains:
+            return [EnrichmentResult(
+                result_type="document",
+                title=f"Reverse-NS: {ns} [none]",
+                summary=f"No domains found using nameserver '{ns}'.",
+                raw_json={"ns": ns, "raw": data} if data else None,
+                confidence="low")]
+
+        shown = domains[:_MAX_ITEMS]
+        header = EnrichmentResult(
+            result_type="document",
+            title=f"Reverse-NS: {ns} — {total} domain(s)",
+            summary=(f"{total} domain(s) use nameserver '{ns}'"
+                     + (f"; showing first {len(shown)}." if total > len(shown) else ".")
+                     + " Shared custom NS is a strong campaign-membership pivot — "
+                       "each domain below is a promotable node."),
+            raw_json={"ns": ns, "domains_count": total, "domains": domains},
+            confidence="medium")
+        items = [EnrichmentResult(
+            result_type="url",
+            title=d,
+            summary=f"Uses nameserver '{ns}' (reverse-NS pivot).",
             url=f"http://{d}",
             confidence="medium") for d in shown]
         return [header] + items

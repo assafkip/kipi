@@ -6,7 +6,6 @@ branded HTML document. Everything is scoped to a single investigation.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from investigations import focus as focus_mod

@@ -32,7 +32,6 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from investigations.storage import db
 from investigations.ingest.extractor import extract_all
 
 

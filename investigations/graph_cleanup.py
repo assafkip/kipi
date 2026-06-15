@@ -143,17 +143,116 @@ def prune_content_edges(conn, case: str | None) -> dict:
         # in this case's entity set (don't touch other cases).
         dst = row["dst_entity_id"]
         if dst in ents and _is_prose(dst):
-            conn.execute("DELETE FROM typed_relationships WHERE id = ?", (row["id"],))
+            from investigations import store
+            store.apply_mutation(conn, store.edges_maintained(
+                case, "delete_ids", actor="pipeline:graph_cleanup",
+                edge_ids=[row["id"]]))
             pruned += 1
     conn.commit()
     return {"pruned_edges": pruned}
 
 
+# An EXPLICIT campaign-membership assertion in finding text — narrow on purpose so
+# a passing mention of a campaign name never fabricates an edge. Only a stated
+# membership relation qualifies.
+MEMBERSHIP_RE = re.compile(
+    r"\b(member of|members of|part of|affiliate(?:d with| of)?|instance of|"
+    r"deployment (?:of|within)|belongs to|node in|operated under|within the|"
+    r"confirmed member|in the .{0,40}\b(?:campaign|network|operation|ring))\b",
+    re.I)
+
+
+def _campaign_org_entities(conn, case: str) -> dict[int, str]:
+    """Case entities that can be the TARGET of a member_of edge: org/indicator
+    nodes that name an actor/campaign, not infra/registrar. The campaign org
+    (e.g. 'Gambler Panel') is resolved by matching its name inside a domain's
+    membership-asserting finding text, so this just supplies the candidate names."""
+    rows = conn.execute(
+        "SELECT DISTINCT e.id, e.canonical_name FROM entities e "
+        "JOIN mentions m ON m.entity_id = e.id JOIN reports r ON r.id = m.report_id "
+        "WHERE r.investigation = ? AND e.entity_type IN ('org','indicator') "
+        "AND (e.notes IS NULL OR e.notes NOT LIKE 'role:noise%')", (case,)).fetchall()
+    # Drop obvious infra/registrar-ish labels; a campaign org is a named actor.
+    out = {}
+    for r in rows:
+        n = r["canonical_name"]
+        if len(n) < 3:
+            continue
+        if re.search(r"\b(LLC|Inc|Ltd|GmbH|registrar|hosting|nameserver)\b", n, re.I):
+            continue
+        out[r["id"]] = n
+    return out
+
+
+def _domain_finding_texts(conn, entity_id: int, case: str) -> list[str]:
+    """Per-finding text tied to a domain IN THIS CASE — one string per enrichment
+    result, scoped through enrichment_runs.investigation so a sibling case's finding
+    can't leak in (Codex gtl-4 finding-1). Returned as a LIST, not concatenated, so
+    the membership marker AND the campaign name must co-occur in the SAME finding
+    (finding-2). entities.notes is deliberately EXCLUDED: it is a global canonical
+    field, so a shared domain could inherit marker+org text written for another
+    context and fabricate an edge in a case that has no membership finding (Codex
+    adversarial). Only case-scoped enrichment findings count as evidence."""
+    texts = []
+    for r in conn.execute(
+        "SELECT er.summary, er.title FROM enrichment_results er "
+        "JOIN enrichment_runs run ON run.id = er.run_id "
+        "WHERE er.extracted_entity_id = ? AND run.investigation = ?",
+        (entity_id, case)):
+        texts.append((r["summary"] or "") + " " + (r["title"] or ""))
+    return [t for t in texts if t.strip()]
+
+
+def link_campaign_members(conn, case: str | None) -> dict:
+    """Connect orphan confirmed-member domains to their campaign org via member_of
+    edges (issue gtl-4). A domain whose finding text EXPLICITLY asserts membership
+    AND names a case campaign-org entity gets a member_of edge to that org — so a
+    confirmed member is no longer a floating node. Deterministic: no marker, no
+    edge; confidence=medium, never attribution. Idempotent (upsert_typed_relationship
+    de-dupes on src,dst,rel_type)."""
+    if not case:
+        return {"member_edges": 0, "links": []}
+    orgs = _campaign_org_entities(conn, case)
+    if not orgs:
+        return {"member_edges": 0, "links": [], "note": "no campaign-org entity in case"}
+    domains = conn.execute(
+        "SELECT DISTINCT e.id, e.canonical_name FROM entities e "
+        "JOIN mentions m ON m.entity_id = e.id JOIN reports r ON r.id = m.report_id "
+        "WHERE r.investigation = ? AND e.entity_type = 'domain'", (case,)).fetchall()
+    links = []
+    for d in domains:
+        # The marker AND a campaign-org name must appear in the SAME finding.
+        matched_org = None
+        for text in _domain_finding_texts(conn, d["id"], case):
+            if not MEMBERSHIP_RE.search(text):
+                continue
+            named = sorted(
+                [(oid, name) for oid, name in orgs.items()
+                 if name.lower() in text.lower() and oid != d["id"]],
+                key=lambda x: len(x[1]), reverse=True)
+            if named:
+                matched_org = named[0]
+                break
+        if not matched_org:
+            continue
+        oid, oname = matched_org
+        from investigations import store
+        store.apply_mutation(conn, store.edge_upserted(
+            case, d["id"], oid, "member_of", actor="pipeline:graph_cleanup",
+            confidence="medium",
+            evidence=f"finding text asserts membership in {oname}",
+            provenance="cleanup:campaign-membership"))
+        links.append({"domain": d["canonical_name"], "campaign": oname})
+    conn.commit()
+    return {"member_edges": len(links), "links": links}
+
+
 def cleanup(conn, case: str | None) -> dict:
-    """Run both passes + recompute scores. Best-effort, case-scoped."""
+    """Run the passes + recompute scores. Best-effort, case-scoped."""
     out = {}
     out.update(normalize_campaigns(conn, case))
     out.update(prune_content_edges(conn, case))
+    out.update(link_campaign_members(conn, case))
     try:
         from investigations import analyze
         analyze.compute_threat_scores(conn)

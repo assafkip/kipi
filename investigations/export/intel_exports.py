@@ -191,7 +191,6 @@ def export_csv(conn, out_dir: Path) -> dict:
 def export_misp(conn, out_path: Path,
                 investigation_name: str = "kipi-investigations") -> Path:
     """Lightweight MISP event JSON."""
-    now = _now_z()
     attributes = []
     misp_type_map = {
         "ip": "ip-src",

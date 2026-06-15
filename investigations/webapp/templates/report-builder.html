@@ -74,7 +74,7 @@
       const v = (data.get(k) || '').trim(); if (v) p.set(k, v);
     }
     p.set('sections', secs);
-    window.open('/report/render?' + p.toString(), '_blank');
+    window.kipiNav.go('/report/render?' + p.toString());
   });
 </script>
 {% endblock %}

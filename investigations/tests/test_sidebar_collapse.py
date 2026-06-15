@@ -1,7 +1,8 @@
-"""PRD-06 (reduce complexity): the Investigate stage's 5 links (Graph / Runs / Enrich /
-Chat / Entities) collapse to ONE sidebar item by default, and reveal as indented
-sub-tabs only when you're in the Investigate section. Cuts the first-timer's sidebar
-from a wall of 13 to ~9.
+"""The sidebar is FLAT by design (decision recorded in _layout.html: "Flat nav —
+no lifecycle staging/wizard"; the chat+graph home does the investigating and
+destinations retire as chat absorbs them). The old PRD-06 section-collapse
+design is gone; these tests pin the FLAT contract so neither the collapse
+machinery nor a nav wall creeps back.
 
 Run: .venv/bin/python -m investigations.tests.test_sidebar_collapse
 """
@@ -41,28 +42,32 @@ def _client(dbp, mp):
     return c
 
 
-def test_collapsed_off_section(mp):
-    with tempfile.TemporaryDirectory() as tmp:
-        c = _client(Path(tmp) / "t.db", mp)
-        html = c.get("/cases").text  # not an investigate page
-        _check("single 'Investigate' item present", ">Investigate<" in html)
-        _check("Runs sub-tab hidden when off-section", "Runs &amp; findings" not in html
-               and "Runs & findings" not in html)
-        _check("Enrich sub-tab hidden when off-section", ">Enrich<" not in html)
+FLAT_NAV = ("Chat + graph", "Reports &amp; intake", "Runs &amp; findings",
+            "Enrich", "Entities", "Deliverables", "Inbox",
+            "Cross-case", "Cross-domain")
 
 
-def test_expanded_in_section(mp):
+def test_flat_nav_on_every_page(mp):
     with tempfile.TemporaryDirectory() as tmp:
         c = _client(Path(tmp) / "t.db", mp)
-        html = c.get("/graph").text  # an investigate page
-        _check("Graph sub-tab shown in-section", ">Graph<" in html)
-        _check("Enrich sub-tab shown in-section", ">Enrich<" in html)
-        # Chat is no longer a sidebar sub-tab — it moved to the always-on bubble.
-        _check("Chat is the always-on bubble, not a side link", "Ask the case" in html)
+        for path in ("/cases", "/graph"):
+            html = c.get(path).text
+            for label in FLAT_NAV:
+                # Present from every page (a page body may legitimately reuse
+                # a label like 'Enrich', so presence, not an exact count).
+                _check(f"{path}: '{label}' present", f">{label}<" in html)
+            _check(f"{path}: no section-collapse 'Investigate' parent",
+                   ">Investigate<" not in html)
+
+
+def test_flat_decision_recorded_in_layout(mp):
+    layout = (Path(__file__).resolve().parents[1] /
+              "webapp" / "templates" / "_layout.html").read_text()
+    _check("flat-nav decision comment present", "Flat nav" in layout)
 
 
 def main():
-    for fn in (test_collapsed_off_section, test_expanded_in_section):
+    for fn in (test_flat_nav_on_every_page, test_flat_decision_recorded_in_layout):
         mp = _MP()
         try:
             fn(mp)

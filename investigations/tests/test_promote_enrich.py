@@ -114,10 +114,10 @@ def main():
             _check("IP result typed as ip", (ip_out["name"], ip_out["type"]), ("198.51.100.5", "ip"))
 
             tgr = _result(conn, _run(conn, actor, "perplexity", "case-a"),
-                          url="https://t.me/order403", title="hub channel")
+                          url="https://t.me/examplegroup", title="hub channel")
             tg_out = promote.promote_result(conn, tgr, analyst="ally")
             _check("telegram url typed as telegram_channel",
-                   (tg_out["name"], tg_out["type"]), ("t.me/order403", "telegram_channel"))
+                   (tg_out["name"], tg_out["type"]), ("t.me/examplegroup", "telegram_channel"))
 
             # --- Refuse to promote a summary/answer (no link, not an indicator) ---
             ansr = _result(conn, _run(conn, actor, "perplexity", "case-a"),

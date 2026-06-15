@@ -53,6 +53,7 @@ def _parse_entry(data: dict) -> dict:
 
 class GravatarAdapter(Adapter):
     slug = "gravatar"
+    watched_types = ('email',)
     display_name = "Gravatar (email -> profile + linked accounts)"
     env_var = None  # keyless
     category = "social"

@@ -1,17 +1,24 @@
 """FastAPI webapp for kipi-investigations."""
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request, UploadFile, File, Form
+import re
+import time
+import urllib.parse
+import urllib.request
+
+from fastapi import FastAPI, Request, UploadFile, File, Form, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from investigations.storage import db
-from investigations.enrich import all_adapters, get_adapter
+from investigations import store
+from investigations.enrich import get_adapter
 from investigations.enrich import runner as enrich_runner
 from investigations.enrich import base as enrich_base
 from investigations import alerts as alerts_mod
@@ -21,6 +28,9 @@ from investigations import activity as activity_mod
 from investigations import client_report as client_report_mod
 from investigations import seen as seen_mod
 from investigations import ask as ask_mod
+from investigations import hypotheses as hypotheses_mod
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_DIR = Path(__file__).parent
@@ -166,31 +176,35 @@ def _active_case(request: Request) -> str | None:
 
 
 # --- PRD-11: one "data changed → refresh" signal --------------------------------
-# Every mutation calls bump_case(case). Open views poll /api/changed and re-fetch when
-# their case's version moves. ONE write point, so a new mutation can't forget to signal;
-# this replaces the per-surface visibilitychange + watchRunThenRefresh reload hacks.
 import threading as _change_threading
-_CHANGE_LOCK = _change_threading.Lock()
-_CASE_VERSIONS: dict = {}
+
+# Every mutation routes through store.apply_mutation, which bumps the case's
+# DB-backed version (investigations.version) inside the SAME transaction as the
+# write — so CLI/pipeline mutations refresh open views too (the old in-memory
+# dict could not, and a forgotten bump went silent: gap 2). These wrappers serve
+# (a) route sites whose underlying helper isn't store-migrated yet and (b) the
+# /api/changed reader. Pass conn= to join an open transaction — NEVER open a
+# second connection while holding an uncommitted write (SQLite single-writer).
 
 
-def bump_case(case) -> int:
-    """Signal that `case` data changed. Open views re-fetch on their next poll.
-    The single write point every mutator routes through."""
+def bump_case(case, conn=None) -> int:
+    """Signal that `case` data changed. Open views re-fetch on their next poll."""
     if not case:
         return 0
-    with _CHANGE_LOCK:
-        version = _CASE_VERSIONS.get(case, 0) + 1
-        _CASE_VERSIONS[case] = version
-        return version
+    if conn is not None:
+        return store.bump_case(conn, case)
+    with db.connect() as fresh:
+        return store.bump_case(fresh, case)
 
 
-def case_version(case) -> int:
+def case_version(case, conn=None) -> int:
     """Current change version for `case` (0 if never bumped)."""
     if not case:
         return 0
-    with _CHANGE_LOCK:
-        return _CASE_VERSIONS.get(case, 0)
+    if conn is not None:
+        return store.case_version(conn, case)
+    with db.connect() as fresh:
+        return store.case_version(fresh, case)
 
 
 @app.get("/api/changed")
@@ -199,6 +213,53 @@ async def api_changed(case: str = "", since: int = 0):
     subscriber (in _layout.html) hits this and re-fetches the open view on a bump."""
     version = case_version(case)
     return JSONResponse({"case": case, "version": version, "changed": version > since})
+
+
+# Same-origin favicon proxy (issue node-favicons; founder decision 2026-06-12). cytoscape
+# forces CORS on node background-images and Google's s2/favicons sends no CORS header, so a
+# direct favicon URL is blocked. This route fetches it server-side and serves it from the
+# kipi origin, which the browser renders cleanly. Privacy is identical to the founder's
+# Google choice (Google still sees the domains, just server-side). Read-only; the `domain`
+# is sanitized and only ever passed to Google's fixed URL as a query param (no SSRF).
+_FAVICON_CACHE: dict = {}          # host -> (bytes, content_type, fetched_at)
+_FAVICON_TTL = 7 * 24 * 3600       # a week
+_FAVICON_MAX = 2000                # bound the in-memory cache
+# Allowlist inert raster/icon types only — never relay SVG (a script vector) or a spoofed
+# Content-Type from the (analyst-choosable) favicon source on our own origin (Codex).
+_FAVICON_OK_TYPES = frozenset({
+    "image/png", "image/x-icon", "image/vnd.microsoft.icon",
+    "image/jpeg", "image/gif", "image/webp",
+})
+_FAVICON_HEADERS = {"Cache-Control": "max-age=604800", "X-Content-Type-Options": "nosniff"}
+
+
+@app.get("/api/favicon")
+async def api_favicon(domain: str = ""):
+    host = re.sub(r"[^a-z0-9.\-]", "", (domain or "").strip().lower())
+    if not host or "." not in host:
+        return Response(status_code=404)
+    now = time.time()
+    hit = _FAVICON_CACHE.get(host)
+    if hit and now - hit[2] < _FAVICON_TTL:
+        return Response(content=hit[0], media_type=hit[1], headers=_FAVICON_HEADERS)
+    url = "https://www.google.com/s2/favicons?sz=64&domain=" + urllib.parse.quote(host)
+
+    def _fetch():
+        req = urllib.request.Request(url, headers={"User-Agent": "kipi-favicon-proxy"})
+        with urllib.request.urlopen(req, timeout=6) as r:   # nosec: fixed Google host
+            ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            return r.read(), ct
+
+    try:
+        data, ctype = await run_in_threadpool(_fetch)
+    except Exception:
+        return Response(status_code=404)
+    if not data or ctype not in _FAVICON_OK_TYPES:   # reject SVG + spoofed/empty types
+        return Response(status_code=404)
+    if len(_FAVICON_CACHE) >= _FAVICON_MAX:
+        _FAVICON_CACHE.clear()
+    _FAVICON_CACHE[host] = (data, ctype, now)
+    return Response(content=data, media_type=ctype, headers=_FAVICON_HEADERS)
 
 
 def _case_in(cases, col: str = "r.investigation"):
@@ -321,12 +382,6 @@ def _lifecycle_state(conn, case: str | None) -> list[dict] | None:
             return 0
 
     reports = _count("SELECT COUNT(*) FROM reports WHERE investigation = ?", case)
-    try:
-        srow = conn.execute("SELECT status FROM case_schemas WHERE case_slug = ?",
-                            (case,)).fetchone()
-        schema_status = srow["status"] if srow else None
-    except Exception:
-        schema_status = None
     runs = _count("SELECT COUNT(*) FROM enrichment_runs "
                   "WHERE provider_slug = 'agent' AND investigation = ?", case)
     findings = _count(
@@ -454,19 +509,19 @@ async def home(request: Request):
             resp = RedirectResponse(url="/cases", status_code=302)
             resp.delete_cookie(CASE_COOKIE)
             return resp
-        # Focus is the home/command-center. Stats reflect the whole selection; the
-        # Focus ranking is per single case (union when multiple/all are selected).
-        stats = _scoped_stats(conn, selected)
+        # Focus is the home/command-center; the Focus ranking is per single case
+        # (union when multiple/all are selected).
         focus = _load_focus(selected[0] if len(selected) == 1 else None, conn)
-        # A single, unprocessed case has no scored focus yet — don't dead-end on the
-        # Focus page. Send the analyst to Reports, where Process runs (schema is
-        # auto-modeled, no approval step). Focus returns once the case is scored.
+        # A single, unprocessed case has no graph yet — don't dead-end on an empty
+        # canvas. Send the analyst to Reports, where Process runs (schema is
+        # auto-modeled, no approval step). The graph home returns once it's processed.
         if len(selected) == 1 and not focus.get("items"):
             return RedirectResponse(url="/reports", status_code=302)
-        nav = {"active_case": _active_case(request), "cases": cases}
-    return _tpl(request, "focus.html", {
-        "focus": focus, "stats": stats, "nav": nav,
-    })
+    # Home IS "a chat with a graph": land the analyst directly in the docked
+    # chat+graph view (graph.html renders the investigator chat beside a live
+    # canvas), not the lifecycle dashboard. The redirects above still guard the
+    # no-case (pick one) and unprocessed (run Process) states.
+    return _tpl(request, "graph.html", {})
 
 
 def _scoped_stats(conn, cases) -> dict:
@@ -663,7 +718,6 @@ async def api_entity_dossier(request: Request, entity_id: int, payload: dict):
 
 @app.post("/api/entity/{entity_id}/dossier/revert")
 async def api_entity_dossier_revert(request: Request, entity_id: int):
-    analyst = _active_analyst(request)
     with db.connect() as conn:
         if not conn.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone():
             return JSONResponse({"error": "unknown entity"}, status_code=404)
@@ -675,7 +729,6 @@ async def api_entity_dossier_revert(request: Request, entity_id: int):
 @app.post("/api/entity/{entity_id}/flag")
 async def api_entity_flag(request: Request, entity_id: int, payload: dict):
     flagged = bool(payload.get("flagged"))
-    analyst = _active_analyst(request)
     with db.connect() as conn:
         row = conn.execute("SELECT id FROM entities WHERE id = ?", (entity_id,)).fetchone()
         if not row:
@@ -1213,7 +1266,6 @@ async def api_report_move(request: Request, report_id: int, payload: dict):
     """Move a report into a different case (the analyst filed it under the wrong
     one). Updates the case tag + re-detects the target case's investigation type,
     same as a fresh upload does."""
-    analyst = _active_analyst(request)
     target = (payload.get("case") or "").strip()
     if not target:
         return JSONResponse({"error": "target case required"}, status_code=400)
@@ -1319,9 +1371,11 @@ def _ingest_saved(paths: list, case: str, analyst: str, objective: str = "") -> 
         extracted = 0
         if new_ids:
             try:
-                analyze_mod.compute_threat_scores(conn)
-            except Exception:
-                pass
+                scored_n = analyze_mod.compute_threat_scores(conn)
+                log.info("upload: rescored %d entities", scored_n)
+            except Exception as exc:
+                log.warning("upload: threat-score recompute failed: %s: %s",
+                            type(exc).__name__, exc)
             try:
                 claims_mod.backfill(conn)
                 extracted = sum(claims_mod.extract_claims_for_report(conn, rid) for rid in new_ids)
@@ -1429,11 +1483,13 @@ async def api_objective(request: Request, objective: str = Form(""),
 # not a blind spinner). Keys MUST match the _step() names below.
 PROCESS_STEPS = [
     ("reextract", "Re-extract fingerprints"),
+    ("retro_clean", "Clean stale extractions"),
     ("consolidate", "Consolidate + de-dupe entities"),
     ("typing", "Type entities to the schema"),
     ("correlate", "Correlate across reports"),
     ("cross_domain", "Find cross-domain links"),
     ("analyze", "Score + cluster"),
+    ("score", "Recompute threat scores"),
     ("graph_metrics", "Graph analytics (centrality + communities)"),
     ("synthesize", "Write the brief"),
     ("dossiers", "Build actor dossiers"),
@@ -1480,6 +1536,7 @@ def _process_case(case: str, analyst: str, on_step=None, on_progress=None) -> di
     from investigations import reextract as reextract_mod, fingerprints as fp_mod
     from investigations import graph_metrics as graph_metrics_mod
     from investigations.correlate import engine as correlate_engine
+    from investigations.maintenance import retro_clean as retro_clean_mod
 
     try:
         _schema_gate(case, analyst)   # auto-proposes + auto-approves; no stop
@@ -1509,6 +1566,10 @@ def _process_case(case: str, analyst: str, on_step=None, on_progress=None) -> di
         # Backfill fingerprint entities (tracking tags, WalletConnect ids, service
         # accounts, nameservers) the original ingest's older extractor missed.
         _step("reextract", lambda: reextract_mod.run(conn, case))
+        # Retroactive cleanup: junk phone nodes, wallet case-twins, and ungated
+        # same_operator edges left by pre-fix extractions (reextract is additive
+        # by contract, so the deletions live in their own pass).
+        _step("retro_clean", lambda: retro_clean_mod.run(conn, case))
         _step("consolidate", lambda: consolidate_mod.run(
             conn, dry_run=False, only_new=False, schema=schema, case=case,
             on_progress=on_progress))
@@ -1520,6 +1581,19 @@ def _process_case(case: str, analyst: str, on_step=None, on_progress=None) -> di
         # Cross-domain links: shared tracking tag / WalletConnect id / nameserver.
         _step("cross_domain", lambda: fp_mod.correlate(conn, case))
         _step("analyze", lambda: analyze_mod.run(conn, VAULT_DIR, schema=schema, case=case))
+
+        # Dedicated score step (gma-1): analyze scores internally, but analyze is
+        # the step with timeout history — when it's skipped, scores must still
+        # compute or the graph's min_score filter silently dies (the gate2 bug).
+        # The count is surfaced three ways: the job log (print -> _JobLogWriter),
+        # an extra on_step emission, and the step status itself.
+        def _score_step():
+            n = analyze_mod.compute_threat_scores(conn)
+            print(f"scored {n} entities")
+            if on_step:
+                on_step(f"scored {n}", "ok")
+
+        _step("score", _score_step)
         # Deterministic graph analytics (centrality + Louvain) over the case
         # subgraph -> node_properties; feeds the style rules (community color,
         # betweenness size). No LLM.
@@ -1688,18 +1762,27 @@ def _find_links(case: str | None, analyst: str) -> dict:
         corr = fp_mod.correlate(conn, case)
         try:
             from investigations import analyze as analyze_mod
-            analyze_mod.compute_threat_scores(conn)
-        except Exception:
-            pass
+            scored_n = analyze_mod.compute_threat_scores(conn)
+            log.info("link-finder: rescored %d entities", scored_n)
+        except Exception as exc:
+            log.warning("link-finder: threat-score recompute failed: %s: %s",
+                        type(exc).__name__, exc)
         activity_mod.log(conn, analyst, "ran cross-domain link finder",
                          investigation=case)
     return {"ok": True, "case": case, "reextract": re, "correlate": corr}
 
 
 def _investigate_entity(entity: str, case: str | None, on_event=None,
-                        question: str | None = None, cancel=None) -> dict:
+                        question: str | None = None, cancel=None,
+                        expand: bool = False) -> dict:
     from investigations.agent import investigator
     with db.connect() as conn:
+        # Maltego EXPAND: pure deterministic one-hop (infra belt + promote, NO LLM brief).
+        # Fast — "pull this node's connections," the founder's click-a-node-to-expand.
+        if expand:
+            return investigator.investigate_entity_quick(conn, entity, case=case,
+                                                         on_event=on_event, cancel=cancel,
+                                                         with_read=False, suggest=True)
         # Default "Investigate this node" = a fast ONE-HOP read (deterministic infra belt +
         # a single short LLM summary), NOT the 28-turn end-to-end agent. The founder's "one
         # node investigation should not go crazy and run 10 minutes — I just want info about
@@ -1791,39 +1874,116 @@ def _investigate_swarm(case: str, shallow: bool, on_event=None, cancel=None,
 
 
 def _new_progress() -> dict:
+    # The 4 aggregate keys are the stable base shape (an existing test pins it by equality).
+    # The run-card per-node fields — `targets` (queued|running|done state machine),
+    # `started_at` (epoch, live elapsed), `secs_per_target` + `eta_s` (historical ETA) — are
+    # layered on by `_investigate_job` at launch and by `_update_progress` lazily, so they are
+    # absent-safe here (run-progress-semantics).
     return {"phase": "starting", "targets_total": 0, "targets_done": 0, "findings": 0}
+
+
+def _progress_target(prog: dict, name: str, create: bool = True):
+    """Find the per-target record by name. With create=True (start signals), lazily add it so
+    deep/whole-case runs — which have no `picked` pre-seed — still show each target as it
+    appears. With create=False (completion lines), return None for an unknown name so a
+    non-target summary like "✓ case mapped (...)" cannot fabricate a per-target node
+    (codex finding-2)."""
+    name = (name or "").strip()
+    for t in prog.setdefault("targets", []):
+        if t["name"] == name:
+            return t
+    if not create:
+        return None
+    rec = {"name": name, "state": "queued", "findings": 0}
+    prog["targets"].append(rec)
+    # Keep the total honest on lazy paths (deep/whole-case have no "picked N" seed): the
+    # per-target list is the floor for targets_total, so the card never shows "1/0"
+    # (codex finding-4). Seeded paths already match (picked sets total == len).
+    prog["targets_total"] = max(prog.get("targets_total", 0), len(prog["targets"]))
+    return rec
+
+
+def _recompute_eta(prog: dict) -> None:
+    """eta_s = (targets not yet done) × historical secs/target. Null when there's no history
+    (cold-start) or no per-target list — never a fabricated number."""
+    secs = prog.get("secs_per_target")
+    targets = prog.get("targets") or []
+    if not secs or not targets:
+        prog["eta_s"] = None
+        return
+    remaining = sum(1 for t in targets if t.get("state") != "done")
+    prog["eta_s"] = int(round(remaining * secs)) if remaining else 0
 
 
 def _update_progress(prog: dict, line: str) -> None:
     """Derive a live progress snapshot from the swarm's own event lines (the same
     ones shown in the trail). The markers below are emitted UNTAGGED by
-    investigate_case/volley; per-target sub-steps are prefixed 'entity · …' so they
-    don't match. Deterministic parse of strings we own — guarded by a unit test."""
+    volley/investigate_selected/_expand_selected; per-target sub-steps are prefixed
+    'entity · …' so they don't match. Deterministic parse of strings we own — guarded by a
+    unit test.
+
+    Besides the aggregate counters, this assembles a per-target state machine
+    (queued → running → done) in `prog["targets"]` so the run card can show node-by-node
+    progress instead of a single "0/N · 0 findings" line that reads as a false negative
+    mid-run (run-progress-semantics). `_recompute_eta` runs after each target-state change."""
     if line == "planning targets…":
         prog["phase"] = "planning"
         return
     if line.startswith("no pivotable entities"):
         prog["phase"] = "done"
         return
-    m = _re.match(r"^picked (\d+) target", line)
+    # "picked N target(s): a, b, c" (investigate_selected + _expand_selected): set the total
+    # AND seed each named target as queued so the card shows the whole belt up front.
+    m = _re.match(r"^picked (\d+) target\(s\)(?::\s*(.*))?$", line)
     if m:
         prog["targets_total"] = int(m.group(1))
         prog["phase"] = "investigating"
+        names = m.group(2)
+        if names:
+            for nm in (n.strip() for n in names.split(",")):
+                if nm:
+                    _progress_target(prog, nm)
+        _recompute_eta(prog)
         return
-    # Crew path: each target ends with a (entity-tagged) "crew merged: N finding(s),
-    # M node(s)" rollup. That's the one-per-target completion signal — the per-sub-agent
-    # "✓ infra: N finding(s)" lines are entity-tagged so they don't match the block below.
-    cm = _re.search(r"crew merged: (\d+) finding\(s\)", line)
-    if cm:
-        prog["targets_done"] += 1
-        prog["findings"] += int(cm.group(1))
+    # Per-target START (untagged): "→ start {ent}" (volley worker) or "expanding {ent}…"
+    # (one-hop set-expand). Flips THAT target to running. startswith guards keep tagged
+    # sub-steps ("{ent} · …") from matching.
+    sm = _re.match(r"^→ start (.+)$", line)
+    if sm:
+        _progress_target(prog, sm.group(1))["state"] = "running"
         prog["phase"] = "investigating"
+        _recompute_eta(prog)
         return
+    em = _re.match(r"^expanding (.+?)…$", line)
+    if em:
+        _progress_target(prog, em.group(1))["state"] = "running"
+        prog["phase"] = "investigating"
+        _recompute_eta(prog)
+        return
+    # Crew path inner rollup: "{ent} · crew merged: N finding(s)" is emitted (tagged) by
+    # investigate_entity_crew. It is intentionally NOT counted here: volley ALWAYS wraps each
+    # result with an UNTAGGED "✓ {ent}: N" (the authoritative per-target completion, fired for
+    # the single-agent AND crew paths alike). Counting the rollup too double-counted
+    # targets_done/findings on every crew target (codex finding-1). The tagged line falls
+    # through inert — it doesn't start with "✓ "/"✗ " so the block below ignores it.
     if line.startswith("✓ ") or line.startswith("✗ "):
         prog["targets_done"] += 1
         fm = _re.search(r": (\d+) finding\(s\)", line)
+        found = int(fm.group(1)) if fm else 0
         if fm:
-            prog["findings"] += int(fm.group(1))
+            prog["findings"] += found
+        # Named per-target completion: "✓ {ent}: K finding(s)" / "✗ {ent}: error". Mark THAT
+        # target done with its count — but only if it is a KNOWN target (create=False), so a
+        # whole-case summary like "✓ case mapped (...)" cannot fabricate a node (finding-2).
+        # A known target with K=0 reads `done · none` (neutral), never a mid-run "0 findings"
+        # verdict — the false-negative this whole feature fixes.
+        dm = _re.match(r"^[✓✗] (.+?)(?::|$)", line)
+        if dm:
+            rec = _progress_target(prog, dm.group(1), create=False)
+            if rec is not None:
+                rec["state"] = "done"
+                rec["findings"] = found
+        _recompute_eta(prog)
 
 
 def _prep_extract(case: str, on_event=None) -> None:
@@ -1866,10 +2026,55 @@ def _investigate_selected(case: str | None, targets: list, on_event=None) -> dic
         return swarm.investigate_selected(conn, case, targets, on_event=on_event)
 
 
+def _expand_selected(case: str | None, targets: list, on_event=None, cancel=None) -> dict:
+    """One-hop EXPAND of a selected SET (Maltego): run the deterministic infra belt on EACH
+    target and promote its direct connections — ONE hop beyond the set, no LLM, no multi-hop
+    chasing. The analyst drives the next hop by expanding the new nodes (founder: 'one set of
+    nodes opens just one additional set of nodes hop beyond it, not multiple hops')."""
+    from investigations.agent import investigator
+    added = 0
+    done = 0
+    all_result_ids: list = []
+    # Seed the per-target progress list up front so the 7-node set shows queued→running→done
+    # node-by-node instead of a frozen "0 findings" (run-progress-semantics). The expand belt
+    # has no LLM "picked" line of its own, so emit the same marker the parser already reads.
+    clean_targets = [str(t) for t in targets if str(t).strip()]
+    if on_event and clean_targets:
+        on_event(f"picked {len(clean_targets)} target(s): {', '.join(clean_targets)}")
+    with db.connect() as conn:
+        for t in clean_targets:
+            if cancel is not None and cancel.is_set():
+                break
+            if on_event:
+                on_event(f"expanding {t}…")
+            r = investigator.investigate_entity_quick(conn, t, case=case, on_event=on_event,
+                                                      cancel=cancel, with_read=False)
+            n_added = int(r.get("nodes_added") or 0)
+            added += n_added
+            all_result_ids += list(r.get("result_ids") or [])
+            done += 1
+            # Named per-target completion: for a one-hop expand, "found" = new connections
+            # promoted. K=0 reads `done · none`, never a standing "0 findings" mid-run.
+            if on_event:
+                on_event(f"✓ {t}: {n_added} finding(s)")
+        # ONE next-hop suggestion for the whole set (the agent advises; the analyst drives).
+        next_hop = ""
+        if all_result_ids and not (cancel is not None and cancel.is_set()):
+            if on_event:
+                on_event("thinking about the next hop…")
+            label = ", ".join(str(t) for t in targets[:5]) + ("…" if len(targets) > 5 else "")
+            next_hop = investigator._suggest_next_hop(
+                f"the selected set ({label})", "mixed",
+                investigator._infra_digest(conn, all_result_ids))
+    return {"ok": True, "case": case, "expanded": done, "nodes_added": added,
+            "next_hop": next_hop, "worked": added > 0 or done > 0}
+
+
 def _investigate_job(entity: str | None, case: str | None, analyst: str,
                      shallow: bool = False, question: str | None = None,
                      prep: bool = False, entities: list | None = None,
-                     deep: bool = False, edge: tuple | None = None) -> None:
+                     deep: bool = False, edge: tuple | None = None,
+                     expand: bool = False) -> None:
     """Background investigator run — an explicit selected set (`entities`), a single
     entity, or (no entity) a whole-case swarm where the agent plans its own targets.
     Streams every move to the job log. `prep` brushes new OSINT artifacts into typed
@@ -1877,10 +2082,20 @@ def _investigate_job(entity: str | None, case: str | None, analyst: str,
     key = _investigate_key(case)
     label = (f"{len(entities)} selected node(s)" if entities else entity) or "whole case"
     cancel = _threading.Event()
+    # Seed the run clock + ETA basis once at launch: started_at drives the live elapsed
+    # display; secs_per_target is the historical avg used for the ETA (None on cold-start).
+    start_progress = _new_progress()
+    start_progress["started_at"] = time.time()
+    try:
+        from investigations.agent import swarm as _swarm_eta
+        with db.connect() as _eta_conn:
+            start_progress["secs_per_target"] = _swarm_eta._historical_seconds_per_target(_eta_conn)[0]
+    except Exception:
+        pass
     with _INVESTIGATE_LOCK:
         _INVESTIGATE_CANCEL[key] = cancel
         _INVESTIGATE_JOBS[key] = {"status": "running", "case": case, "entity": label,
-                                  "log": [], "progress": _new_progress()}
+                                  "log": [], "progress": start_progress}
 
     def on_event(line: str) -> None:
         with _INVESTIGATE_LOCK:
@@ -1908,11 +2123,13 @@ def _investigate_job(entity: str | None, case: str | None, analyst: str,
         if edge:
             result = _investigate_edge(edge[0], edge[1], case, on_event=on_event,
                                        cancel=cancel)
+        elif entities and expand:
+            result = _expand_selected(case, entities, on_event=on_event, cancel=cancel)
         elif entities:
             result = _investigate_selected(case, entities, on_event=on_event)
         elif entity:
             result = _investigate_entity(entity, case, on_event=on_event, question=question,
-                                         cancel=cancel)
+                                         cancel=cancel, expand=expand)
         else:
             result = _investigate_swarm(case, shallow, on_event=on_event, cancel=cancel,
                                         deep=deep)
@@ -1931,7 +2148,11 @@ def _investigate_job(entity: str | None, case: str | None, analyst: str,
         # Auto-write the brief BEFORE marking the job done, so the deliverable is fresh the
         # moment a run finishes (the founder shouldn't have to click Regenerate). Best-effort:
         # a brief failure never fails the investigation whose findings already landed.
-        if status == "done" and case:
+        # SKIP on EXPAND and any SINGLE-NODE run: a one-hop expand or a "just info about this
+        # node" dig should NOT re-synthesize the whole-case brief (an LLM pass) — that was the
+        # hidden cost/slowness on every node click. The whole-case + selected-set runs still
+        # auto-refresh the deliverable; single-node uses the on-demand Regenerate brief button.
+        if status == "done" and case and not expand and not entity:
             try:
                 _set_phase("writing brief")
                 on_event("writing the brief…")
@@ -1972,6 +2193,20 @@ async def api_investigate_preflight():
     return JSONResponse(swarm.tool_status())
 
 
+@app.get("/api/investigate/estimate")
+async def api_investigate_estimate(request: Request):
+    """Pre-run cost estimate so the analyst sees the bill BEFORE committing a run (kills the
+    'expensive black box' sin). ?deep=1 estimates a whole-case deep run; default is a one-hop
+    expand. Returns the POINT estimate (est_typical_usd) + the cap ceiling + the basis. NEVER
+    blocks a run — informational only (cost-model-budget-the-scope)."""
+    from investigations.agent import swarm
+    case = _active_case(request)
+    deep = str(request.query_params.get("deep", "")).strip() in ("1", "true", "True", "yes")
+    with db.connect() as conn:
+        est = swarm.estimate_run(conn, case, deep=deep)
+    return JSONResponse(est)
+
+
 @app.post("/api/investigate")
 async def api_investigate(request: Request):
     """Run the investigator agent. Body: {entities:[..]} for an analyst-chosen set
@@ -2007,6 +2242,7 @@ async def api_investigate(request: Request):
                           args=(entity or None, case, analyst, bool(body.get("shallow")),
                                 question, bool(body.get("prep")), capped or None,
                                 bool(body.get("deep"))),
+                          kwargs={"expand": bool(body.get("expand"))},
                           daemon=True)
     t.start()
     record_ui_event(case, f"launched an investigation on {label}")
@@ -2297,28 +2533,221 @@ async def runs_page(request: Request):
 def _synthesize_case(case: str, analyst: str) -> dict:
     """Regenerate the case synthesis brief in-process (same call the Process
     pipeline makes), so the analyst can refresh it without a terminal."""
-    from investigations import synthesize as synthesize_mod
+    from investigations import synthesize as synthesize_mod, tradecraft
     with db.connect() as conn:
         synthesize_mod.run(conn, VAULT_DIR, case=case)
         activity_mod.log(conn, analyst, "regenerated the synthesis brief",
                          investigation=case)
-    return {"ok": True, "case": case}
+        # SOFT nudge (founder: never block): if a tradecraft gate hasn't run, surface it
+        # on the brief so the analyst sees what was skipped — they decide whether to go back.
+        unmet = tradecraft.unmet_gates(conn, case)
+    out = {"ok": True, "case": case}
+    if unmet:
+        names = ", ".join(s["label"] for s in unmet)
+        out["tradecraft_warning"] = (
+            f"Brief generated, but {len(unmet)} tradecraft gate(s) haven't run: {names}. "
+            "Consider running them before you deliver.")
+        out["unmet_gates"] = [s["key"] for s in unmet]
+    return out
+
+
+_SYNTH_JOBS: dict = {}
+_SYNTH_LOCK = _threading.Lock()
+
+
+def _synthesize_job(case: str, analyst: str) -> None:
+    """Run the brief on the SERVER in a background thread, so switching windows or
+    reloading the page can't kill it (the old blocking fetch died when the tab backgrounded
+    mid-LLM-pass). The UI polls /api/synthesize/status and reconnects on load."""
+    try:
+        # Project FIRST: a brief never renders pre-override state (sp3).
+        from investigations import projection
+        with db.connect() as conn:
+            projection.project(conn, case)
+            conn.commit()
+        result = _synthesize_case(case, analyst)
+        # The brief regenerated: ONE event that logs the act + bumps the case
+        # version in the same transaction (gap 2 closed structurally).
+        with db.connect() as conn:
+            store.apply_mutation(conn, store.brief_generated(
+                case, actor=f"analyst:{analyst}",
+                detail={"trigger": "synthesize-job"}))
+        with _SYNTH_LOCK:
+            _SYNTH_JOBS[case] = {**result, "status": "done"}
+    except Exception as exc:
+        with _SYNTH_LOCK:
+            _SYNTH_JOBS[case] = {"status": "error", "error": str(exc)[:200], "case": case}
 
 
 @app.post("/api/synthesize")
 async def api_synthesize(request: Request):
-    """Regenerate the synthesis brief for the active case, in-app (closes the
-    input → findings → deliverable loop without dropping to the CLI)."""
+    """Start a brief regeneration as a background JOB (closes the input → findings →
+    deliverable loop without the CLI). Returns immediately; poll /api/synthesize/status.
+    The server does the LLM pass, so the brief completes even if the analyst switches
+    windows or reloads (the old blocking fetch dropped the work when the tab backgrounded)."""
     case = _active_case(request)
     if not case:
         return JSONResponse({"error": "Pick a single case to regenerate its brief."},
                             status_code=400)
     analyst = _active_analyst(request)
+    with _SYNTH_LOCK:
+        cur = _SYNTH_JOBS.get(case)
+        if cur and cur.get("status") == "running":
+            return JSONResponse({"status": "running", "case": case})
+        _SYNTH_JOBS[case] = {"status": "running", "case": case}
+    _threading.Thread(target=_synthesize_job, args=(case, analyst), daemon=True).start()
+    return JSONResponse({"status": "started", "case": case})
+
+
+@app.get("/api/synthesize/status")
+async def api_synthesize_status(request: Request):
+    """Poll the brief job for the active case: idle | running | done | error."""
+    case = _active_case(request)
+    with _SYNTH_LOCK:
+        job = dict(_SYNTH_JOBS.get(case) or {"status": "idle"})
+    return JSONResponse(job)
+
+
+def _explain_cluster(case: str | None, names: list[str]) -> dict:
+    """Plain-English read of a selected cluster: gather the nodes + how they interconnect
+    + a claim or two each, then one bounded LLM pass answers 'what is this?'."""
+    from investigations.llm import client as llm
+    with db.connect() as conn:
+        ents = []
+        for n in [x for x in names if x][:40]:
+            row = conn.execute(
+                "SELECT id, canonical_name, entity_type FROM entities "
+                "WHERE canonical_name = ? COLLATE NOCASE LIMIT 1", (n,)).fetchone()
+            if row:
+                ents.append(row)
+        if not ents:
+            return {"ok": False, "error": "Could not resolve the selected nodes."}
+        idset = {e["id"] for e in ents}
+        lines = []
+        for e in ents:
+            edges = conn.execute(
+                "SELECT t.rel_type, t.dst_entity_id, e2.canonical_name AS other "
+                "FROM typed_relationships t JOIN entities e2 ON e2.id = t.dst_entity_id "
+                "WHERE t.src_entity_id = ? AND COALESCE(t.status,'active') = 'active' LIMIT 20",
+                (e["id"],)).fetchall()
+            within = [f"{r['rel_type']} → {r['other']}" for r in edges if r["dst_entity_id"] in idset]
+            out_links = [f"{r['rel_type']} → {r['other']}" for r in edges if r["dst_entity_id"] not in idset]
+            claim = conn.execute(
+                "SELECT value FROM claims WHERE entity_id = ? AND value IS NOT NULL "
+                "AND length(value) > 0 LIMIT 1", (e["id"],)).fetchone()
+            part = f"- {e['canonical_name']} ({e['entity_type'] or 'entity'})"
+            org = _node_origin(conn, e["id"])
+            if org and org.get("trail"):
+                part += f"; origin: {org['trail']}"
+            if within:
+                part += "; in-cluster: " + "; ".join(within[:6])
+            if out_links:
+                part += "; also: " + "; ".join(out_links[:4])
+            if claim and claim["value"]:
+                part += f"; note: {str(claim['value'])[:120]}"
+            lines.append(part)
+    body = "\n".join(lines)
+    system = (
+        "You are an OSINT analyst. Given a CLUSTER of graph nodes (each with its ORIGIN — "
+        "how it entered the investigation), answer in plain English and tight: (1) WHERE this "
+        "cluster came from — what seed or pivot brought it in (use the origins; if it looks "
+        "disconnected, say what tied it to the case); (2) what it IS (one actor's "
+        "infrastructure, a payment chain, a content network, a coincidence); (3) the bottom "
+        "line + the single best next pivot. Lead with the origin. No preamble, no restating "
+        "the node list.")
+    prompt = f"Case: {case or '(unscoped)'}\n\nCluster ({len(lines)} nodes):\n{body}\n\nWhat is this cluster?"
     try:
-        result = await run_in_threadpool(_synthesize_case, case, analyst)
+        ans = llm.ask(prompt, system=system, tools=False, max_tokens=700).strip()
     except Exception as exc:
-        return JSONResponse({"error": f"Brief regeneration failed: {str(exc)[:200]}"},
-                            status_code=500)
+        return {"ok": False, "error": str(exc)[:200]}
+    return {"ok": True, "answer": ans or "(no read returned)", "node_count": len(lines)}
+
+
+@app.post("/api/cluster/explain")
+async def api_cluster_explain(request: Request):
+    """'What is this?' for a selected cluster (the node ledger / a box-selection). Body:
+    {names:[...]}. Returns a plain-English read of what the cluster represents + the next pivot."""
+    body = await request.json()
+    raw = body.get("names") or []
+    names = [s.strip() for s in raw if isinstance(s, str) and s.strip()] if isinstance(raw, list) else []
+    if not names:
+        return JSONResponse({"error": "Select some nodes first, then ask."}, status_code=400)
+    case = _active_case(request)
+    try:
+        result = await run_in_threadpool(_explain_cluster, case, names)
+    except Exception as exc:
+        return JSONResponse({"error": f"Cluster read failed: {str(exc)[:200]}"}, status_code=500)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=500)
+    return JSONResponse(result)
+
+
+@app.get("/api/tradecraft")
+async def api_tradecraft_state(request: Request):
+    """The per-case tradecraft checklist (Scope/Challenge/Premortem gates + helper steps),
+    for the chat's step bar. None/empty for no single case."""
+    from investigations import tradecraft
+    case = _active_case(request)
+    with db.connect() as conn:
+        st = tradecraft.state(conn, case)
+    return JSONResponse({"case": case, "steps": st or []})
+
+
+@app.post("/api/tradecraft/scope")
+async def api_tradecraft_scope(request: Request):
+    """Capture the case framing (the analyst feeds it): the question, the hypotheses, and
+    what counts as proof. Stored as the 'scope' gate artifact."""
+    from investigations import tradecraft
+    case = _active_case(request)
+    if not case:
+        return JSONResponse({"error": "Pick a single case to scope."}, status_code=400)
+    body = await request.json()
+    question = (body.get("question") or "").strip()
+    hypotheses = (body.get("hypotheses") or "").strip()
+    proof = (body.get("proof") or "").strip()
+    if not question:
+        return JSONResponse({"error": "A core question is required to scope the case."},
+                            status_code=400)
+    content = (f"## Core question\n{question}\n\n## Hypotheses\n{hypotheses or '(none stated)'}"
+               f"\n\n## What counts as proof\n{proof or '(not specified)'}")
+    analyst = _active_analyst(request)
+    with db.connect() as conn:
+        tradecraft.record(conn, case, "scope", content, analyst=analyst)
+        activity_mod.log(conn, analyst, "scoped the investigation", investigation=case)
+        st = tradecraft.state(conn, case)
+    bump_case(case)
+    return JSONResponse({"ok": True, "step": "scope", "content": content, "steps": st})
+
+
+@app.post("/api/tradecraft/run")
+async def api_tradecraft_run(request: Request):
+    """Run an analytical gate (challenge | premortem) over the case's current findings,
+    store the result, and return it for display in the chat."""
+    from investigations import tradecraft
+    case = _active_case(request)
+    if not case:
+        return JSONResponse({"error": "Pick a single case to run this step."}, status_code=400)
+    body = await request.json()
+    step = (body.get("step") or "").strip()
+    if step not in ("challenge", "premortem"):
+        return JSONResponse({"error": "step must be 'challenge' or 'premortem'."},
+                            status_code=400)
+    analyst = _active_analyst(request)
+
+    def _go():
+        with db.connect() as conn:
+            out = tradecraft.run_analysis(conn, case, step, analyst=analyst)
+            if out.get("ok"):
+                activity_mod.log(conn, analyst, f"ran the {step} analysis", investigation=case)
+                out["steps"] = tradecraft.state(conn, case)
+            return out
+
+    try:
+        result = await run_in_threadpool(_go)
+    except Exception as exc:
+        return JSONResponse({"error": f"{step} failed: {str(exc)[:200]}"}, status_code=500)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=500)
     bump_case(case)
     return JSONResponse(result)
 
@@ -2444,6 +2873,39 @@ async def synthesis_page(request: Request):
     return _tpl(request, "synthesis.html",
                 {"content": content, "stale": stale, "regen_cmd": regen_cmd,
                  "has_brief": synth_path.exists(), "can_regen": bool(case)})
+
+
+@app.get("/api/assessment")
+async def api_assessment(request: Request):
+    """The whole-case assessment (the synthesis brief markdown) for the on-graph overlay —
+    a read-only peek at the same brief `/synthesis` renders, so the analyst sees the verdict
+    without leaving the graph (assessment-dossier-promotion). Mirrors synthesis_page's read.
+
+    Every edge case returns 200 with has_brief:false rather than an error, so the overlay
+    shows its empty state and never a broken panel: no active case, missing/unreadable/empty
+    brief, or a freshness-check that raises (stale:null, best-effort)."""
+    case = _active_case(request)
+    if not case:
+        return JSONResponse({"has_brief": False, "case": None, "markdown": "", "stale": None})
+    synth_path = _synth_path(case)
+    try:
+        content = synth_path.read_text(encoding="utf-8") if synth_path.exists() else ""
+    except OSError:
+        content = ""
+    if not content.strip():
+        return JSONResponse({"has_brief": False, "case": case, "markdown": "", "stale": None})
+    stale = None
+    try:
+        with db.connect(migrate=False) as conn:
+            _state, stale = _brief_freshness(conn, case)
+    except Exception:
+        stale = None  # best-effort: a freshness failure must not blank the assessment
+    # Strip YAML frontmatter so it doesn't render as body text (same as synthesis_page).
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) == 3:
+            content = parts[2].lstrip("\n")
+    return JSONResponse({"has_brief": True, "case": case, "markdown": content, "stale": stale})
 
 
 @app.get("/exports", response_class=HTMLResponse)
@@ -2814,7 +3276,13 @@ async def api_graph(request: Request, min_score: float = 30.0, cluster_id: int |
         # entities (not a global node_properties scan) — a small case must not pay
         # O(all properties). metrics_provenance names the case that computed the
         # score (last-write-wins on shared entities is the documented model).
-        _METRIC_KEYS = ("degree_centrality", "betweenness", "eigenvector", "community")
+        # path_confidence (graph-trust-layer gtl-1): the strength of a node's
+        # WEAKEST link back to a case seed, so the front-end can de-weight a strong
+        # sub-chain that hangs off one weak bridge. Carried as a numeric data attr
+        # alongside the centrality metrics. A node with NO path_confidence row is
+        # unreachable from a seed (not weak — unanchored); left absent, not 0-faked.
+        _METRIC_KEYS = ("degree_centrality", "betweenness", "eigenvector", "community",
+                        "path_confidence")
         visible_ids = [e["id"] for e in entities]
         node_metrics: dict[int, dict] = {}
         if visible_ids:
@@ -2857,11 +3325,18 @@ async def api_graph(request: Request, min_score: float = 30.0, cluster_id: int |
                            else "intake"),
                 **node_metrics.get(e["id"], {}),
             }})
-        edges = []
-        for r in conn.execute(
-            "SELECT src_entity_id, dst_entity_id, rel_type, confidence, evidence "
+        # t.id (the integer PK) is selected so the client can address the real edge
+        # for hypothesis tagging (ea-2) — the cytoscape `id` below is a fabricated
+        # display string, not addressable.
+        edge_rows = conn.execute(
+            "SELECT id, src_entity_id, dst_entity_id, rel_type, confidence, evidence "
             "FROM typed_relationships WHERE status = 'active'"
-        ).fetchall():
+        ).fetchall()
+        visible_edge_ids = [r["id"] for r in edge_rows
+                            if r["src_entity_id"] in node_ids and r["dst_entity_id"] in node_ids]
+        edge_hyp = hypotheses_mod.tags_for_edges(conn, visible_edge_ids)
+        edges = []
+        for r in edge_rows:
             if r["src_entity_id"] in node_ids and r["dst_entity_id"] in node_ids:
                 src_cl = node_cluster_map.get(r["src_entity_id"], set())
                 dst_cl = node_cluster_map.get(r["dst_entity_id"], set())
@@ -2872,6 +3347,7 @@ async def api_graph(request: Request, min_score: float = 30.0, cluster_id: int |
                 bridge_edge = (len(src_cl) >= 2) or (len(dst_cl) >= 2)
                 edges.append({"data": {
                     "id": f"e{r['src_entity_id']}-{r['dst_entity_id']}-{r['rel_type']}",
+                    "edge_id": r["id"],
                     "source": str(r["src_entity_id"]),
                     "target": str(r["dst_entity_id"]),
                     "rel_type": r["rel_type"],
@@ -2879,6 +3355,7 @@ async def api_graph(request: Request, min_score: float = 30.0, cluster_id: int |
                     "evidence": (r["evidence"] or "")[:200],
                     "cross_cluster": strict_cross,
                     "bridge_edge": bridge_edge,
+                    "hypotheses": edge_hyp.get(r["id"], []),
                 }})
         # Co-occurrence ("same pic") edges: entities that appeared together in a report.
         # These live in `relationships` (rel_type='co_mentioned'), which the graph never
@@ -2935,6 +3412,49 @@ async def api_graph(request: Request, min_score: float = 30.0, cluster_id: int |
         ).fetchall()]
     return JSONResponse({"nodes": nodes, "edges": edges, "clusters": clusters_data,
                          "co_truncated": co_truncated})
+
+
+@app.post("/api/edge/{edge_id}/hypothesis")
+async def api_edge_hypothesis(request: Request, edge_id: int):
+    """Set or clear a hypothesis stance on a typed edge (ea-2). Body:
+    {hypothesis, stance ∈ supports/contradicts/consistent_with} to set, or
+    {hypothesis, clear: true} to remove. Never mutates the edge itself."""
+    analyst = _active_analyst(request)
+    case = _active_case(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    hyp = (payload.get("hypothesis") or "").strip()
+    if not hyp:
+        return JSONResponse({"error": "hypothesis is required"}, status_code=400)
+    with db.connect() as conn:
+        if payload.get("clear"):
+            result = hypotheses_mod.clear_tag(conn, edge_id, hyp, author=analyst)
+        else:
+            try:
+                result = hypotheses_mod.set_tag(conn, edge_id, hyp,
+                                                payload.get("stance"), author=analyst)
+            except hypotheses_mod.BadStance as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+        if result.get("error"):
+            return JSONResponse(result, status_code=400)
+        _log(request, conn, "tagged edge hypothesis", detail=f"edge {edge_id}: {hyp}")
+        bump_case(case, conn=conn)
+    return JSONResponse(result, status_code=200)
+
+
+@app.get("/api/entity/{entity_id}/artifacts")
+async def api_entity_artifacts(entity_id: int):
+    """The captured point-in-time evidence artifacts for an entity (ea-1) — the raw
+    provider/finding responses that ground this node, newest-first, so an analyst
+    can pull the proof even after the live source changed or died."""
+    from investigations import evidence as evidence_mod
+    with db.connect() as conn:
+        artifacts = evidence_mod.artifacts_for_entity(conn, entity_id)
+    return JSONResponse({"entity_id": entity_id, "artifacts": artifacts})
 
 
 @app.get("/api/entity/{entity_id}/neighborhood")
@@ -3012,6 +3532,51 @@ def _providers_for_type(entity_type: str | None) -> set[str] | None:
     if not belt:
         return None
     return {slug for slug, _mode in belt}
+
+
+def _origin_target(query: str) -> str:
+    """The clean target a run was investigating, from its (possibly messy / tab-joined)
+    query string — the host the analyst would recognise."""
+    import re as _re
+    q = (query or "").strip()
+    m = _re.search(r"https?://([^/\s]+)", q)
+    host = m.group(1) if m else (q.split()[0] if q.split() else q)
+    return _re.sub(r"^www\.", "", host.strip().lower()).rstrip("/")[:60] or "the case"
+
+
+def _node_origin(conn, entity_id: int) -> dict | None:
+    """Where this node came from — so it never looks 'out of nowhere' (founder 2026-06-11).
+    A found node traces to the run that surfaced it, and that run's query is the target the
+    investigator was digging (its pivot source). An ingested node traces to its report."""
+    e = conn.execute("SELECT canonical_name, provenance, first_seen_at FROM entities "
+                     "WHERE id = ?", (entity_id,)).fetchone()
+    if not e:
+        return None
+    prov = (e["provenance"] or "").strip().lower()
+    when = (e["first_seen_at"] or "")[:10]
+    run = conn.execute(
+        "SELECT er.query FROM enrichment_results res JOIN enrichment_runs er ON er.id = res.run_id "
+        "WHERE res.extracted_entity_id = ? ORDER BY er.started_at LIMIT 1", (entity_id,)).fetchone()
+    if run and run["query"]:
+        tgt = _origin_target(run["query"])
+        if tgt and tgt not in (e["canonical_name"] or "").lower():
+            return {"trail": f"found by the investigator while digging {tgt}",
+                    "when": when, "kind": "pivot", "from": tgt}
+        return {"trail": "found by the investigator agent", "when": when, "kind": "agent"}
+    rep = conn.execute(
+        "SELECT r.title, r.source_type FROM mentions m JOIN reports r ON r.id = m.report_id "
+        "WHERE m.entity_id = ? AND COALESCE(r.source_type,'') != 'enrichment' "
+        "ORDER BY r.id LIMIT 1", (entity_id,)).fetchone()
+    if prov.startswith("ingest") or rep:
+        src = (rep["title"] if rep else None) or "an uploaded report"
+        return {"trail": f"extracted from {src}", "when": when, "kind": "intake"}
+    if prov == "analyst":
+        return {"trail": "you added this manually", "when": when, "kind": "analyst"}
+    if prov in ("agent", "osint"):
+        return {"trail": "found by the investigator agent", "when": when, "kind": "agent"}
+    if prov.startswith("enrich"):
+        return {"trail": "materialized from an infrastructure lookup", "when": when, "kind": "enrich"}
+    return {"trail": prov or "origin unknown", "when": when, "kind": "other"}
 
 
 @app.get("/api/entity/{entity_id}/detail")
@@ -3122,10 +3687,16 @@ async def api_entity_detail(entity_id: int, request: Request):
             if o:
                 co_occurs.append({"other_id": r["other_id"], "other": o["canonical_name"],
                                   "shared": r["shared"]})
+        # Compute the origin trail INSIDE the `with` block — it queries `conn`, so it must
+        # run before the connection closes. (Bug: it used to run in the return dict below,
+        # after the block exited → "Cannot operate on a closed database" → the endpoint
+        # 500'd on every node, and the panel's swallowed-error path left in/out at 0.)
+        origin_trail = _node_origin(conn, entity_id)
     return JSONResponse({
         "id": entity_id, "name": e["canonical_name"],
         "type": e["case_type"] or e["entity_type"], "surface_type": e["entity_type"],
         "role": role, "sub_role": e["sub_role"] or "", "origin": origin, "degree": e["deg"],
+        "origin_trail": origin_trail,   # WHERE it came from (never "out of nowhere")
         "provenance": e["provenance"] or "", "properties": properties,
         "in_degree": in_degree, "out_degree": out_degree, "dossier": dossier,
         "sources": sources, "connections": conns, "clusters": clusters,
@@ -3244,6 +3815,58 @@ def _chat_lock(case: str) -> asyncio.Lock:
         return lock
 
 
+# One-hop chat routing (prd: chat-one-hop-routing). DETERMINISTIC, no LLM classify:
+# a one-hop verb + a node the message names that resolves to a KNOWN case entity, and NO
+# "deep" qualifier → expand that node ONE hop (matches the graph + the canonical one-hop
+# model). "deep …"/whole-case/questions/unknown targets fall through to the warm agent.
+_ONE_HOP_VERB_RE = _re.compile(r"\b(investigate|expand|look into|dig into|look up|pull|enrich)\b", _re.I)
+_DEEP_RE = _re.compile(r"\b(deep|whole[ -]?case|end[ -]?to[ -]?end|full sweep|map (the|out)|recursiv|everything)\b", _re.I)
+
+
+def _one_hop_target(message: str, case: str | None, selected: str | None) -> str | None:
+    """The KNOWN case node a one-hop chat command names, or None to fall through to the
+    warm agent. None when: no one-hop verb, a 'deep' qualifier is present, or no entity in
+    the message resolves to a node in this case (a new/fuzzy target → the agent handles it)."""
+    if not message or not _ONE_HOP_VERB_RE.search(message) or _DEEP_RE.search(message):
+        return None
+    from investigations.ingest.extractor import extract_all
+    from investigations.webapp.graph_chat import _resolve
+    candidates = []
+    if selected:
+        candidates.append(selected)
+    candidates += [e.canonical for e in extract_all(message)]
+    seen = set()
+    with db.connect() as conn:
+        for c in candidates:
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            eid, name = _resolve(conn, c, case)
+            if eid:
+                return name
+    return None
+
+
+def _activity_context(case: str | None) -> str:
+    """The note() bridge (gap 3): the case's recent event-log tail, prepended
+    to every warm turn so analyst actions (hide / add / reject) are in the
+    agent's working context next turn. One shared source —
+    store.format_recent_activity — also feeds /ask (never two readers)."""
+    if not case:
+        return ""
+    try:
+        # migrate=False: a hot read-only probe at the top of EVERY warm turn —
+        # never re-run the schema migration (and its commit) here.
+        with db.connect(migrate=False) as conn:
+            tail = store.format_recent_activity(conn, case)
+    except Exception:
+        return ""
+    if not tail:
+        return ""
+    return ("RECENT CASE ACTIVITY (the analyst sees this graph; their actions "
+            "are authoritative):\n" + tail + "\n\n")
+
+
 def _run_chat_turn(case: str, message: str, selected: str | None,
                    on_step=None, cancel=None, redirect=None) -> dict:
     """Sync worker (off the event loop): persist the analyst turn, run the warm
@@ -3264,6 +3887,44 @@ def _run_chat_turn(case: str, message: str, selected: str | None,
     graph_touched = False
     stopped = False
     redirected = False
+    cost_usd = None      # real $ spend of the warm turn (from the SDK ResultMessage)
+    cost_estimated = False  # true when cost_usd is a price-table estimate (stopped turn)
+    elapsed_s = None     # wall-clock seconds for the turn
+
+    # ONE-HOP DEFAULT (prd: chat-one-hop-routing): "investigate/expand <known node>" with no
+    # "deep" qualifier expands ONE hop + suggests the next hop — the canonical analyst-driven
+    # model — instead of the multi-hop autonomous agent. "deep …"/whole-case/questions/unknown
+    # targets fall through to the warm agent below. Runs inside this job so steps still stream.
+    one_hop = _one_hop_target(message, case, selected)
+    if one_hop:
+        # The infra belt emits STRING events; the chat job's on_step expects step DICTS —
+        # adapt so the live trail renders (tool line for "infra: …", reasoning otherwise).
+        def _belt_step(line):
+            if on_step:
+                txt = str(line)
+                is_tool = txt.startswith("infra:")
+                on_step({"type": "tool" if is_tool else "reasoning",
+                         "tool": (txt.replace("infra:", "").split("\u2192")[0].strip() if is_tool else None),
+                         "text": txt[:200]})
+        _belt_step(f"one-hop expand of {one_hop}")
+        result = _investigate_entity(one_hop, case, on_event=_belt_step, expand=True, cancel=cancel)
+        n = result.get("nodes_added", 0) if isinstance(result, dict) else 0
+        nh = (result or {}).get("next_hop") or ""
+        reply = f"Expanded **{one_hop}** — added {n} connected node(s) one hop out."
+        if nh:
+            reply += f"\n\n**Suggested next hop:** {nh}"
+        elif not n:
+            reply += (" Nothing new surfaced one hop out — try another node, or say "
+                      "\"deep investigate " + one_hop + "\" for the full agent.")
+        if ui_rows:
+            _advance_ui_mark(case, ui_rows[-1]["id"])
+        with db.connect() as conn:
+            aid = db.add_chat_turn(conn, case, ROLE_AGENT, reply)
+        return {"reply": reply, "steps": [], "capped": False, "deltas": {},
+                "action": None, "agent_turn_id": aid, "graph_touched": True,
+                "stopped": bool(cancel is not None and cancel.is_set()), "redirected": False,
+                "cost_usd": None, "cost_estimated": False, "elapsed_s": None, "step_count": 0}
+
     if warm_run_available():
         from investigations.agent.warm_session import run_turn_on_warm_loop
         from investigations.agent import graph_tools
@@ -3271,7 +3932,7 @@ def _run_chat_turn(case: str, message: str, selected: str | None,
         # Append the findings contract so the turn both TALKS and emits landable findings —
         # talking to the investigator BUILDS the graph (issue warm-lands-findings).
         base = (_ui_prefix(ui_rows) + "\n\n" + message) if ui_rows else message
-        task = base + inv.CHAT_FINDINGS_CONTRACT
+        task = _activity_context(case) + base + inv.CHAT_FINDINGS_CONTRACT
         try:
             # NO wall-clock deadline: an investigation runs to its OWN completion (the
             # agent's recursive-completeness doctrine + its max-turns backstop decide when
@@ -3326,6 +3987,9 @@ def _run_chat_turn(case: str, message: str, selected: str | None,
         graph_touched = landed_intel or bool(deltas) or any(
             graph_tools.is_graph_tool(t) for t in (run.get("tools") or []))
         redirected = bool(run.get("redirected"))
+        cost_usd = run.get("cost_usd")
+        cost_estimated = bool(run.get("cost_estimated"))
+        elapsed_s = run.get("elapsed_s")
     else:
         r = _graph_chat(message, case, selected)  # deterministic router fallback
         reply = r.get("reply", "")
@@ -3338,7 +4002,9 @@ def _run_chat_turn(case: str, message: str, selected: str | None,
                                deltas=deltas or None, steps=steps or None, capped=capped)
     return {"reply": reply, "steps": steps, "capped": capped, "deltas": deltas,
             "action": action, "agent_turn_id": aid, "graph_touched": graph_touched,
-            "stopped": stopped, "redirected": redirected}
+            "stopped": stopped, "redirected": redirected,
+            "cost_usd": cost_usd, "cost_estimated": cost_estimated,
+            "elapsed_s": elapsed_s, "step_count": len(steps or [])}
 
 
 # Live chat jobs: the warm path runs as a background job so steps stream + Stop
@@ -3350,14 +4016,28 @@ _CHAT_LOCK = _change_threading.Lock()
 _CHAT_STEP_MAX = 200  # cap the live step list a job holds
 
 
+# Guess-only types the GRAPH already excludes from display (4 SQL filters on
+# `entity_type != 'person_candidate'`). The live dig runs over TOOL NARRATION, where
+# the proper-name regex matches UI/HTTP boilerplate ("Ran Playwright", "Page Title",
+# "Not Found") as person_candidate. Minting them draws phantom edges to nodes the graph
+# never shows — so the writer applies the SAME exclusion the display does. A real person
+# enters the graph as `person` (hint-backed) or via the typing pass, not as a raw guess
+# off browser narration (trump-demo, 2026-06-11).
+_LIVE_DIG_EXCLUDED_TYPES = {"person_candidate"}
+
+
 def _entities_from(text: str) -> list:
     """Deduped {type,value} entities in a blob, via extract_all — the SAME deterministic
-    regex extractor the ingest path uses, so the overlay's vocabulary matches what lands."""
+    regex extractor the ingest path uses, so the overlay's vocabulary matches what lands.
+    Drops guess-only types the graph itself excludes (person_candidate), so the live dig
+    never draws an edge to a node the display would hide."""
     if not text or not text.strip():
         return []
     from investigations.ingest.extractor import extract_all
     out, seen = [], set()
     for e in extract_all(text):
+        if e.entity_type in _LIVE_DIG_EXCLUDED_TYPES:
+            continue
         key = (e.entity_type, e.canonical)
         if key in seen:
             continue
@@ -3436,6 +4116,16 @@ def _persist_step_discovery(case: str, step: dict) -> int:
         return 0
     from investigations.enrich.promote import _enrichment_report
     from investigations.enrich.rel_vocab import normalize_rel
+    from investigations.admission import is_admissible
+    # The live dig is a graph-CREATION path, so it must clear the SAME admission gate as
+    # every other creation path (RCA rca-recurring-graph-noise). A junk anchor (a bare
+    # tracking id, a reference domain) roots nothing worth keeping — skip the whole step;
+    # a junk FOUND entity is dropped individually so the rest of the step still lands.
+    if not is_admissible(anchor.get("type"), anchor.get("value"))[0]:
+        return 0
+    found = [f for f in found if is_admissible(f.get("type"), f.get("value"))[0]]
+    if not found:
+        return 0
     tool = step.get("raw_tool") or step.get("tool") or ""
     # The osint command (crtsh/whois/dns) is usually in the INPUT (the bash invocation),
     # not the tool name ("Bash") — derive the relationship from both so edges are labeled
@@ -3448,8 +4138,12 @@ def _persist_step_discovery(case: str, step: dict) -> int:
                 "SELECT 1 FROM investigations WHERE slug = ?", (case,)).fetchone():
             return 0   # case deleted mid-run — don't resurrect it
         rep_id = _enrichment_report(conn, case)
-        anchor_id = db.upsert_entity(conn, anchor["value"], anchor["type"], rep_id,
-                                     provenance="osint")
+        anchor_res = store.apply_mutation(conn, store.entity_upserted(
+            case, anchor["value"], anchor["type"], rep_id, actor="agent",
+            provenance="osint"))
+        if not anchor_res["applied"]:
+            return 0
+        anchor_id = anchor_res["entity_id"]
         # Mentions scope an entity into a case (case views join mentions →
         # reports.investigation, see promote._primary_case). Without these rows the
         # live-dig nodes are invisible to every case-scoped surface (issue
@@ -3465,7 +4159,12 @@ def _persist_step_discovery(case: str, step: dict) -> int:
 
         _mention_once(anchor_id, anchor["value"])
         for f in found:
-            fid = db.upsert_entity(conn, f["value"], f["type"], rep_id, provenance="osint")
+            found_res = store.apply_mutation(conn, store.entity_upserted(
+                case, f["value"], f["type"], rep_id, actor="agent",
+                provenance="osint"))
+            if not found_res["applied"]:
+                continue
+            fid = found_res["entity_id"]
             _mention_once(fid, f["value"])
             if fid != anchor_id:
                 ev = f"discovered via {tool}".strip()
@@ -3477,8 +4176,9 @@ def _persist_step_discovery(case: str, step: dict) -> int:
                 # the analyst watches build live IS the one that persists. Without this the
                 # live dig lands only in `relationships`, which the graph never reads, and the
                 # canvas stays empty.
-                db.upsert_typed_relationship(conn, anchor_id, fid, rel,
-                                             evidence=ev, provenance="osint")
+                store.apply_mutation(conn, store.edge_upserted(
+                    case, anchor_id, fid, rel, actor="agent",
+                    evidence=ev, provenance="osint"))
                 written += 1
     return written
 
@@ -3821,7 +4521,11 @@ async def api_chat_stream(request: Request, case: str = ""):
             if status in ("done", "stopped", "error", "idle"):
                 payload = {"status": status, "reply": job.get("reply"),
                            "graph_touched": bool(job.get("graph_touched")),
-                           "redirected": bool(job.get("redirected"))}
+                           "redirected": bool(job.get("redirected")),
+                           "cost_usd": job.get("cost_usd"),
+                           "cost_estimated": bool(job.get("cost_estimated")),
+                           "elapsed_s": job.get("elapsed_s"),
+                           "step_count": job.get("step_count")}
                 yield f"event: done\ndata: {json.dumps(payload)}\n\n"
                 break
             await asyncio.sleep(0.25)
@@ -3936,13 +4640,16 @@ async def api_run_control(request: Request):
 @app.post("/api/node/{entity_id}/unhide")
 async def api_node_unhide(request: Request, entity_id: int):
     """Restore a soft-hidden node (the Undo for a chat 'hide')."""
+    case = _active_case(request)
+    analyst = _active_analyst(request)
     with db.connect() as conn:
-        conn.execute("UPDATE entities SET hidden = 0 WHERE id = ?", (entity_id,))
+        result = store.apply_mutation(conn, store.entity_unhidden(
+            case, entity_id, actor=f"analyst:{analyst}"))
+        if not result["applied"]:
+            return JSONResponse({"error": result["reason"]}, status_code=404)
         conn.commit()
         row = conn.execute(
             "SELECT canonical_name FROM entities WHERE id = ?", (entity_id,)).fetchone()
-    case = _active_case(request)
-    bump_case(case)
     record_ui_event(case, f"restored node {row['canonical_name'] if row else entity_id}")
     return JSONResponse({"ok": True, "id": entity_id})
 
@@ -4306,6 +5013,77 @@ async def api_enrich_set_key(slug: str, payload: dict):
     })
 
 
+# Intent groups for the OSINT transform menu (issue graph-osint-dropdown-grouping).
+# The analyst reads by intent, not a flat 39-row wall of jargon. Unknown/new slugs
+# fall through to "Other" so the menu never HIDES a provider; "Other" is the safety
+# net, not a target. Keep roughly in sync with the adapter registry.
+_TRANSFORM_GROUP = {
+    # Infrastructure — DNS / whois / certs / hosting / IP geo / lookalikes
+    "asn": "Infrastructure", "crtsh": "Infrastructure", "infra": "Infrastructure",
+    "ipgeo": "Infrastructure", "whoisxml": "Infrastructure", "censys": "Infrastructure",
+    "shodan": "Infrastructure", "typosquat": "Infrastructure",
+    # Threat intel — reputation / abuse / blocklists / sanctions / dark web
+    "abusech": "Threat intel", "abuseipdb": "Threat intel", "otx": "Threat intel",
+    "virustotal": "Threat intel", "greynoise": "Threat intel", "urlscan": "Threat intel",
+    "crypto_abuse": "Threat intel", "ofac": "Threat intel", "darkweb": "Threat intel",
+    # On-chain — wallet / chain explorers / labels
+    "blockchair": "On-chain", "ens": "On-chain", "solana": "On-chain", "tron": "On-chain",
+    "wallet": "On-chain", "wallet_labels": "On-chain", "wallet_ton": "On-chain",
+    "walletexplorer": "On-chain",
+    # Identity — email / breach / people / orgs / handles / phone
+    "email": "Identity", "gravatar": "Identity", "hibp": "Identity", "breach": "Identity",
+    "opencorporates": "Identity", "username": "Identity", "phone": "Identity",
+    # Web search — general web recon
+    "tavily": "Web search", "perplexity": "Web search", "jina": "Web search",
+    "exa": "Web search", "git_osint": "Web search",
+    # Social — social-platform scrapers
+    "apify": "Social",
+    # Other — media/forensics with no larger bucket
+    "exif": "Other",
+}
+_TRANSFORM_GROUP_ORDER = ["Infrastructure", "Threat intel", "On-chain", "Identity",
+                          "Web search", "Social", "Other"]
+
+
+@app.get("/api/transforms")
+async def api_transforms(type: str = "", entity_id: int | None = None):
+    """The Maltego-style type-filtered transform menu (sp2-transform-menu-api),
+    GROUPED by intent + flagged with already-run state (issue
+    graph-osint-dropdown-grouping). What can run on a node of this type, in the
+    registry recipe map's order. Unknown/missing type -> an empty list (an untyped
+    node has no menu, never a refusal). Unconfigured transforms are INCLUDED with
+    configured=false (discoverability over hiding). With entity_id, each provider
+    carries `ran` = whether it has already run on that entity, so the analyst sees
+    what is left to do, not just a flat wall."""
+    from investigations.enrich.registry import transforms_for_type
+    # Threadpool: is_configured() does sync SQLite reads — keep them off the
+    # event loop (codex adversarial).
+    transforms = await run_in_threadpool(transforms_for_type, type)
+
+    ran: set = set()
+    if entity_id:
+        def _ran_slugs():
+            with db.connect() as conn:
+                # status='success' only: a queued/running/error run must NOT show the
+                # ✓ "already ran" marker (codex adversarial) — that would hide work left to do.
+                return {r[0] for r in conn.execute(
+                    "SELECT DISTINCT provider_slug FROM enrichment_runs "
+                    "WHERE entity_id = ? AND status = 'success'",
+                    (entity_id,))}
+        ran = await run_in_threadpool(_ran_slugs)
+
+    for t in transforms:
+        t["group"] = _TRANSFORM_GROUP.get(t["slug"], "Other")
+        t["ran"] = t["slug"] in ran
+
+    by_group: dict = {}
+    for t in transforms:
+        by_group.setdefault(t["group"], []).append(t)
+    groups = [{"group": g, "items": by_group[g]}
+              for g in _TRANSFORM_GROUP_ORDER if g in by_group]
+    return JSONResponse({"type": type, "transforms": transforms, "groups": groups})
+
+
 @app.post("/api/enrich/run")
 async def api_enrich_run(payload: dict):
     provider = payload.get("provider")
@@ -4375,7 +5153,7 @@ async def api_enrich_promote(request: Request, result_id: int):
         if not result.get("error"):
             _log(request, conn, "promoted enrichment to node",
                  entity_id=result.get("entity_id"), detail=result.get("name"))
-            bump_case(case)
+            bump_case(case, conn=conn)
             record_ui_event(result.get("case") or case,
                             f"promoted finding {result.get('name') or result.get('entity_id')}")
             return JSONResponse(result, status_code=200)
@@ -4399,9 +5177,34 @@ async def api_enrich_promote(request: Request, result_id: int):
                          (row["entity_id"], result_id))
             conn.commit()
             _log(request, conn, "added finding to actor dossier", entity_id=row["entity_id"])
-            bump_case(case)
+            bump_case(case, conn=conn)
             return JSONResponse({"ok": True, "added_to_dossier": True,
                                  "entity_id": row["entity_id"]}, status_code=200)
+    return JSONResponse(result, status_code=400)
+
+
+@app.post("/api/enrich/result/{result_id}/reject")
+async def api_enrich_reject(request: Request, result_id: int):
+    """Analyst rejects an enrichment finding (gtl-2): records decision='rejected'
+    + a rejection claim on the source actor, no node built. The accept side is
+    handled inside /promote (promote_result writes decision='accepted')."""
+    from investigations.enrich import promote as promote_mod
+    analyst = _active_analyst(request)
+    case = _active_case(request)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    reason = (payload.get("reason") or "").strip() or None
+    with db.connect() as conn:
+        result = promote_mod.reject_result(conn, result_id, analyst=analyst, reason=reason)
+        if not result.get("error"):
+            _log(request, conn, "rejected enrichment finding",
+                 detail=f"result #{result_id}")
+            bump_case(case, conn=conn)
+            record_ui_event(case, f"rejected finding #{result_id}")
+            return JSONResponse(result, status_code=200)
     return JSONResponse(result, status_code=400)
 
 
@@ -4436,7 +5239,7 @@ async def api_enrich_decide(request: Request, result_id: int, payload: dict):
         if not result.get("error"):
             _log(request, conn, f"enrich volume decision: {action}",
                  detail=str(result.get("cluster_name") or result.get("added") or action))
-            bump_case(case)
+            bump_case(case, conn=conn)
             record_ui_event(case, f"enrich decision {action} on result #{result_id}")
     return JSONResponse(result, status_code=200 if not result.get("error") else 400)
 

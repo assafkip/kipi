@@ -27,7 +27,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from investigations import verify
-from investigations.storage import db
+from investigations import store
 from investigations.llm import client as llm
 
 # 80 (not 40): since ~90% of a CLI call is fixed boot overhead, fewer/larger batches
@@ -240,18 +240,16 @@ def _apply_cluster(conn, cluster: dict, actor_roles: set[str] | None = None) -> 
     if existing:
         merge_ids = list(merge_ids) + [canonical_id]
         canonical_id = existing["id"]
-        conn.execute(
-            "UPDATE entities SET notes = ?, sub_role = ?, sub_role_reason = ? "
-            "WHERE id = ?",
-            (notes, sub_role or None, sub_role_reason or None, canonical_id),
-        )
+        store.apply_mutation(conn, store.entity_merged(
+            None, canonical_id, merge_ids, actor="pipeline:consolidate",
+            fields={"notes": notes, "sub_role": sub_role or None,
+                    "sub_role_reason": sub_role_reason or None}))
     else:
-        conn.execute(
-            "UPDATE entities SET canonical_name = ?, notes = ?, sub_role = ?, "
-            "sub_role_reason = ? WHERE id = ?",
-            (canonical_name, notes, sub_role or None, sub_role_reason or None,
-             canonical_id),
-        )
+        store.apply_mutation(conn, store.entity_merged(
+            None, canonical_id, merge_ids, actor="pipeline:consolidate",
+            fields={"canonical_name": canonical_name, "notes": notes,
+                    "sub_role": sub_role or None,
+                    "sub_role_reason": sub_role_reason or None}))
 
     merged = 0
     for mid in merge_ids:
@@ -296,7 +294,9 @@ def _absorb(conn, mid: int, canonical_id: int) -> bool:
     # regenerable derived rows. Without this the DELETE hits a FK constraint
     # (foreign_keys=ON) and corrupts the half-merged batch.
     _merge_entity_refs(conn, mid, canonical_id)
-    conn.execute("DELETE FROM entities WHERE id = ?", (mid,))
+    store.apply_mutation(conn, store.entity_merged(
+        None, canonical_id, [mid], actor="pipeline:consolidate",
+        delete_merged=True))
     return True
 
 
@@ -335,6 +335,15 @@ def _merge_entity_refs(conn, mid: int, canonical_id: int) -> None:
         if _table_exists(conn, tbl):
             where = " OR ".join(f"{c} = ?" for c in cols)
             conn.execute(f"DELETE FROM {tbl} WHERE {where}", tuple([mid] * len(cols)))
+    # Node properties / alerts / evidence: PRESERVE by re-pointing to the survivor
+    # (UNIQUE constraints make the survivor's row win on collision; the duplicate's
+    # leftover is dropped). node_properties + alerts have NO delete-cascade, so missing
+    # them here fails the final DELETE with a FK error (escape-twin merge, 2026-06-11).
+    for tbl in ("node_properties", "alerts", "evidence_artifacts"):
+        if _table_exists(conn, tbl):
+            conn.execute(f"UPDATE OR IGNORE {tbl} SET entity_id = ? WHERE entity_id = ?",
+                         (canonical_id, mid))
+            conn.execute(f"DELETE FROM {tbl} WHERE entity_id = ?", (mid,))
     # Enrichment history references entities by nullable cols — null them, keep history.
     if _table_exists(conn, "enrichment_runs"):
         conn.execute("UPDATE enrichment_runs SET entity_id = NULL WHERE entity_id = ?", (mid,))
@@ -551,8 +560,9 @@ def run(conn, dry_run: bool = False, only_new: bool = False,
             llm_entities.append(e)
             continue
         if not dry_run:
-            conn.execute("UPDATE entities SET notes = ? WHERE id = ?",
-                         (f"role:{role}", e["id"]))
+            store.apply_mutation(conn, store.entities_retyped_batch(
+                None, [{"entity_id": e["id"], "fields": {"notes": f"role:{role}"}}],
+                actor="pipeline:consolidate"))
         stats["clusters"] += 1
         stats["roles"][role] += 1
         if role == "noise":

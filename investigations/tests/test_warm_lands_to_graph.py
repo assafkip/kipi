@@ -86,8 +86,12 @@ def test_warm_lands_and_routes_serve():
         # Point the webapp at the temp DB (routes call db.connect() with no arg).
         _orig_connect = db.connect
         mp.setattr(db, "connect", lambda db_path=None, migrate=True: _orig_connect(dbp, migrate=migrate))
-        # Warm ON; warm runner stubbed; cold path forbidden.
+        # Warm ON; warm runner stubbed; cold path forbidden. The explicit
+        # warm_run_available pin overrides the conftest guard that defaults
+        # every offline test to warm-unavailable (this test opts in, with the
+        # runner faked, so it stays offline).
         mp.setattr(os, "environ", {**os.environ, "KIPI_WARM_SESSION": "1"})
+        mp.setattr(investigator, "warm_run_available", lambda: True)
         mp.setattr(investigator, "_run_agent_warm", _canned_warm_run)
         mp.setattr(investigator, "_run_agent", _cold_must_not_run)
 

@@ -67,7 +67,20 @@ def _score(text: str, terms: list[str]) -> int:
 
 
 def _candidates(conn, case: str | None) -> list[dict]:
-    """Build the passage pool: one per OCR'd page, plus chunked report raw_text."""
+    """Build the passage pool: one per OCR'd page, plus chunked report raw_text,
+    plus the case's recent activity tail (the note() bridge: "what did I just
+    hide?" answers from the same event log the agent grounds on)."""
+    out_activity = []
+    if case:
+        from investigations import store
+        tail = store.format_recent_activity(conn, case)
+        if tail:
+            out_activity.append({
+                "report_id": None, "report_title": "Recent case activity",
+                "page_number": None, "file_path": None,
+                "text": "Recent case activity (analyst + agent actions, newest "
+                        "first):\n" + tail, "kind": "activity",
+            })
     where_a, params_a = ("WHERE r.investigation = ? ", [case]) if case else ("", [])
     pages = conn.execute(
         "SELECT a.report_id, a.page_number, a.file_path, a.ocr_text, r.title AS report_title "
@@ -76,7 +89,7 @@ def _candidates(conn, case: str | None) -> list[dict]:
         ("AND " if case else "WHERE ") + "a.ocr_text IS NOT NULL AND a.ocr_text != ''",
         params_a,
     ).fetchall()
-    out = [{
+    out = out_activity + [{
         "report_id": p["report_id"], "report_title": p["report_title"],
         "page_number": p["page_number"], "file_path": p["file_path"],
         "text": p["ocr_text"], "kind": "page",

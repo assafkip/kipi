@@ -155,12 +155,10 @@ def test_web_swarm_default_is_analyst_driven(mp):
     # bounded pass; deep=True re-seeds multi-pass. The old per-entity volley→crew
     # fan-out is no longer the default.
     from investigations.agent import investigator
-    called = {"agentic": 0, "shallow": 0, "deep_loop": 0, "passes": []}
+    called = {"agentic": 0, "deep_loop": 0, "passes": []}
     def _agentic(conn, case, on_event=None, max_passes=1, **k):
         called["agentic"] += 1; called["passes"].append(max_passes); return {"ok": True}
     mp.setattr(investigator, "investigate_case_agentic", _agentic)
-    mp.setattr(swarm, "investigate_case",
-               lambda conn, case, on_event=None, **k: called.__setitem__("shallow", called["shallow"] + 1) or {"ok": True})
     mp.setattr(swarm, "deep_investigate",
                lambda *a, **k: called.__setitem__("deep_loop", called["deep_loop"] + 1) or {"ok": True})
     import contextlib
@@ -169,8 +167,8 @@ def test_web_swarm_default_is_analyst_driven(mp):
         yield None
     mp.setattr(app_module.db, "connect", _noconn)
     app_module._investigate_swarm("cx", shallow=False)   # the default
-    _check("default → ONE bounded agent (no fan-out), not the volley",
-           called["agentic"] == 1 and called["shallow"] == 0)
+    _check("default → ONE bounded agent (no fan-out)",
+           called["agentic"] == 1)
     _check("default loops to completeness (CASE_MAX_PASSES backstop, not a single hop)",
            called["passes"] == [investigator.CASE_MAX_PASSES])
     app_module._investigate_swarm("cx", shallow=False, deep=True)   # opt-in: deep multi-pass
@@ -179,11 +177,63 @@ def test_web_swarm_default_is_analyst_driven(mp):
     _check("the old Python deep_investigate loop is NOT used", called["deep_loop"] == 0)
 
 
+def test_pre_run_estimate_math_and_equality(mp):
+    """prd: pre-run-cost-estimate. estimate_run is the SINGLE source of truth — its point
+    estimate is exactly the number deep_investigate announces up front (no before/after
+    drift). Cold-start falls back to EST_COST_PER_TARGET; once there's prior agent spend it
+    uses the historical avg. One-hop is a fixed tiny estimate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = Path(tmp) / "t.db"; db.init_db(dbp)
+        with db.connect(dbp) as conn:
+            # Cold start: no agent runs yet → fallback per-target, basis cold-start.
+            est = swarm.estimate_run(conn, "cx", deep=True, cost_cap=2.7, budget=99)
+            _check("cold-start basis when no agent history", est["basis"] == "cold-start")
+            # cap 2.7 / per-target 0.9 = 3 targets (the SAME math deep_investigate uses).
+            _check("est_targets = cap / per-target", est["est_targets"] == 3)
+            _check("cold-start typical = targets * fallback per-target",
+                   abs(est["est_typical_usd"] - 3 * swarm.EST_COST_PER_TARGET) < 1e-6)
+            _check("cap ceiling is carried for the worst case", est["cost_cap_usd"] == 2.7)
+
+            # One-hop expand: fixed tiny point estimate, no cap.
+            oh = swarm.estimate_run(conn, "cx", deep=False)
+            _check("one-hop is the fixed tiny estimate",
+                   oh["est_targets"] == 1
+                   and abs(oh["est_typical_usd"] - round(swarm.EST_COST_PER_ONE_HOP, 4)) < 1e-9)
+            _check("one-hop has no cap", oh["cost_cap_usd"] is None)
+
+            # Historical: seed past agent runs with known costs → avg drives the point estimate.
+            # (FK enforced: the 'agent' provider must exist before its runs.)
+            conn.execute("INSERT INTO osint_providers (slug, display_name) VALUES ('agent', 'Agent')")
+            for c in (1.0, 2.0):   # avg 1.5
+                conn.execute("INSERT INTO enrichment_runs (provider_slug, query, status, cost_usd) "
+                             "VALUES ('agent', 'x', 'done', ?)", (c,))
+            conn.commit()
+            est2 = swarm.estimate_run(conn, "cx", deep=True, cost_cap=2.7, budget=99)
+            _check("basis flips to historical once agent runs exist", est2["basis"] == "historical")
+            _check("typical = historical avg (1.5) * targets (3) = 4.5",
+                   abs(est2["est_typical_usd"] - 4.5) < 1e-6)
+
+        # Equality: the dollar figure deep_investigate announces UP FRONT == estimate_run's.
+        orig = db.connect
+        mp.setattr(swarm.db, "connect", lambda migrate=True, db_path=dbp: orig(db_path=db_path, migrate=migrate))
+        mp.setattr(swarm, "plan_investigation", lambda conn, case, limit=12: (["seed1"], {"source": "t"}))
+        mp.setattr(swarm, "volley", _cost_volley(0.1))
+        mp.setattr(swarm, "_uninvestigated_targets", lambda conn, case, seen, limit: [])
+        events = []
+        with db.connect(dbp) as conn:
+            ref = swarm.estimate_run(conn, "cx", deep=True, cost_cap=2.7, budget=99)
+            swarm.deep_investigate(conn, "cx", cost_cap=2.7, budget=99, rounds=1, on_event=events.append)
+        plan_line = next((e for e in events if "est ~$" in e), "")
+        _check("deep_investigate announces estimate_run's exact number (no drift)",
+               f"${ref['est_typical_usd']:.2f}" in plan_line)
+
+
 def main():
     test_bounded_depth_defaults()
     test_uninvestigated_inventory_includes_wallets()
     for fn in (test_loops_until_dry, test_budget_cap_stops_and_is_flagged,
                test_cost_cap_bounds_scope_and_finishes, test_runaway_backstop,
+               test_pre_run_estimate_math_and_equality,
                test_web_swarm_default_is_analyst_driven):
         mp = _MP()
         try:

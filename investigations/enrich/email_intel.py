@@ -164,15 +164,42 @@ def parse_received_chain(raw_headers: str) -> dict:
             "auth_results": auth}
 
 
+def _holehe_scan(email: str) -> list[dict]:
+    """Run holehe across its ~120 site modules -> [{name, exists, ...}]. The static imports
+    here let test_oss_install enforce the holehe + httpx declarations; a missing dep becomes
+    a clear EnrichmentError (never an import crash to the agent). Monkeypatched in tests."""
+    import asyncio
+    try:
+        import httpx
+        from holehe.core import import_submodules, get_functions
+    except ImportError:
+        raise EnrichmentError("email holehe: holehe not installed (pip install holehe)")
+
+    async def _scan() -> list[dict]:
+        out: list[dict] = []
+        async with httpx.AsyncClient() as client:
+            for func in get_functions(import_submodules("holehe.modules")):
+                res: list[dict] = []
+                try:
+                    await func(email, client, res)
+                except Exception:
+                    continue
+                out.extend(res)
+        return out
+
+    return asyncio.run(_scan())
+
+
 class EmailIntelAdapter(Adapter):
     slug = "email"
+    watched_types = ('email',)
     display_name = "Email intel (triage MX/SPF/DMARC + header->IP pivot)"
     env_var = None  # keyless
     category = "infra"
     cost_per_call_usd = 0.0
 
     def modes(self) -> list[str]:
-        return ["triage", "headers"]
+        return ["triage", "headers", "holehe"]
 
     def run(self, query: str, mode: str | None = None,
             timeout: int = 30) -> list[EnrichmentResult]:
@@ -182,7 +209,34 @@ class EmailIntelAdapter(Adapter):
             mode = "headers"
         if mode == "headers":
             return self._run_headers(query)
+        if mode == "holehe":
+            return self._run_holehe(query, timeout)
         return self._run_triage(query, timeout)
+
+    # ---------- mode: holehe (account-registration enum, T3 leads) ----------
+
+    def _run_holehe(self, query: str, timeout: int = 60) -> list[EnrichmentResult]:
+        """Which of ~120 sites this email has an account on. Account-enumeration is a
+        HYPOTHESIS lead, not a crosslink — every hit lands low-confidence + gated."""
+        email = (query or "").strip().lower()
+        if "@" not in email:
+            raise EnrichmentError("email holehe: not an email address")
+        results = _holehe_scan(email)  # seam: monkeypatched in tests
+        hits = [r for r in results if r.get("exists") is True]
+        header = EnrichmentResult(
+            result_type="document",
+            title=f"holehe: {email} — registered on {len(hits)} site(s)",
+            summary=("Account-registration leads (HYPOTHESIS — corroborate before any "
+                     "finding):\n" + "\n".join(f"- {h.get('name')}" for h in hits[:40])),
+            raw_json={"email": email, "sites": [h.get("name") for h in hits],
+                      "tier": "T3", "lead": True},
+            confidence="low")
+        rows = [EnrichmentResult(
+            result_type="url", title=f"{h.get('name')} ({email})",
+            summary=f"{email} has an account on {h.get('name')} (holehe — T3 lead).",
+            raw_json={"tier": "T3", "lead": True, "site": h.get("name")},
+            confidence="low") for h in hits]
+        return [header] + rows
 
     # ---------- mode: triage ----------
 

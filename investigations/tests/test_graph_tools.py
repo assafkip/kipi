@@ -86,6 +86,50 @@ def test_handlers_mutate_deterministically():
             db.connect = orig
 
 
+def test_agent_add_node_clears_admission_gate_analyst_is_not_gated():
+    """The agent's graph_add_node is a graph-CREATION path: it must clear the same
+    admission gate as every other one (RCA rca-recurring-graph-noise), and its rows
+    land as 'osint' provenance — never 'analyst'. The ANALYST's own add is never
+    gated and lands as 'analyst' (top authority)."""
+    from investigations.webapp import graph_chat
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = Path(tmp) / "t.db"; db.init_db(dbp)
+        with db.connect(dbp) as conn:
+            db.insert_report(conn, "r.md", "h", "markdown", "R", "case-g", "x")
+            conn.commit()
+        orig = db.connect
+        db.connect = lambda migrate=True, db_path=dbp: orig(db_path=db_path, migrate=migrate)
+        try:
+            add = graph_tools._make_handler("add_node", "case-g")
+            # junk (registry boilerplate) via the AGENT tool → rejected, no row
+            out = asyncio.run(add({"name": "isnic.is", "node_type": "domain"}))
+            _check("agent junk add is refused with a reason",
+                   "Not adding" in out["content"][0]["text"])
+            with db.connect(dbp) as conn:
+                row = conn.execute("SELECT 1 FROM entities WHERE canonical_name = 'isnic.is'"
+                                   ).fetchone()
+            _check("agent junk add created NO entity", row is None)
+            # real entity via the AGENT tool → created, provenance osint
+            asyncio.run(add({"name": "scam-target.com", "node_type": "domain"}))
+            with db.connect(dbp) as conn:
+                row = conn.execute("SELECT provenance FROM entities WHERE canonical_name = "
+                                   "'scam-target.com'").fetchone()
+            _check("agent add lands with osint provenance, never analyst",
+                   row is not None and row["provenance"] == "osint")
+            # the SAME junk via the ANALYST router → allowed, analyst provenance
+            with db.connect(dbp) as conn:
+                out = graph_chat.execute(conn, "add_node",
+                                         {"name": "isnic.is", "node_type": "domain"},
+                                         "case-g", None)   # default actor="analyst"
+                row = conn.execute("SELECT provenance FROM entities WHERE canonical_name = "
+                                   "'isnic.is'").fetchone()
+            _check("analyst add is never gated (top authority)", row is not None)
+            _check("analyst add lands with analyst provenance",
+                   row["provenance"] == "analyst")
+        finally:
+            db.connect = orig
+
+
 def test_factory_wires_graph_server_and_allowlist():
     # Capture the ClaudeAgentOptions the factory builds, without a real client.
     import claude_agent_sdk as sdk

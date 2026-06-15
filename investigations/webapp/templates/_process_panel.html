@@ -150,7 +150,7 @@ function processPanel(caseSlug, processed) {
         if (d.status === 'running') return;
         clearInterval(this.timer); this.timer = null; this.busy = false;
         if (d.status === 'error') { this.hint = (d.result && d.result.error) || 'Processing failed'; }
-        else { this.label = 'Done'; location.reload(); }
+        else { this.label = 'Done'; window.kipiNav.refresh(); }
       }, 2000);
     },
   };

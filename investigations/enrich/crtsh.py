@@ -16,6 +16,7 @@ from investigations.enrich.base import Adapter, EnrichmentResult, EnrichmentErro
 
 class CrtShAdapter(Adapter):
     slug = "crtsh"
+    watched_types = ('domain', 'subdomain')
     display_name = "crt.sh certificate transparency"
     env_var = None  # keyless
     category = "infra"

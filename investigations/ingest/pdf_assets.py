@@ -3,7 +3,6 @@ PDF engine) to pull page text, render scanned pages, and decode embedded image
 objects. Replaced PyMuPDF 2026-06-10: it is AGPL and was the one
 license-constraining dependency (see q-system/output/oss-license-decision.md);
 pdfium covers the same surface with no outbound-license strings."""
-import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path

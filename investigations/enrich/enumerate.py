@@ -63,12 +63,22 @@ def _materialize_property_nodes(conn, case: str, on_event=None) -> list[str]:
             etype, rel = "email", "registered_by"
         else:
             continue
-        eid = db.upsert_entity(conn, value, etype, rep_id, provenance="enrich:infra")
+        # Entity-admission contract (RCA rca-recurring-graph-noise-2026-06-11): the
+        # store gates pipeline-actor creations, so a whois/DNS result can't
+        # materialize boilerplate (a registry email, etc.) as a node.
+        from investigations import store
+        created = store.apply_mutation(conn, store.entity_upserted(
+            case, value, etype, rep_id, actor="pipeline:enrich",
+            provenance="enrich:infra"))
+        if not created["applied"]:
+            continue
+        eid = created["entity_id"]
         db.add_mention(conn, eid, rep_id, value, "deterministic enumeration")
         if eid != r["entity_id"]:
-            db.upsert_typed_relationship(conn, r["entity_id"], eid, rel,
-                                         evidence=f"{r['key']} via infra lookup",
-                                         provenance="enrich:infra")
+            store.apply_mutation(conn, store.edge_upserted(
+                case, r["entity_id"], eid, rel, actor="pipeline:enrich",
+                evidence=f"{r['key']} via infra lookup",
+                provenance="enrich:infra"))
             made.append(value)
             if on_event:
                 on_event(f"materialized: {rel} → {value}")
@@ -90,7 +100,12 @@ def _belt_one(conn, name: str, case: str, analyst: str, on_event, cancel) -> tup
         if etype == "indicator":
             return [], []   # not a beltable artifact (prose, partial name) — skip
         rep_id = _enrichment_report(conn, case)
-        eid = db.upsert_entity(conn, name, etype, rep_id, provenance="enrich:infra")
+        from investigations import store
+        # gate=False: the agent-surfaced seed was never gated here pre-migration
+        # (the _classify 'indicator' skip above is the only filter). Preserved.
+        eid = store.apply_mutation(conn, store.entity_upserted(
+            case, name, etype, rep_id, actor="pipeline:enrich",
+            provenance="enrich:infra", gate=False))["entity_id"]
         db.add_mention(conn, eid, rep_id, name, "enumeration seed")
     result_ids, ran = _run_infra_belt(conn, name, etype, case,
                                       on_event=on_event, cancel=cancel)

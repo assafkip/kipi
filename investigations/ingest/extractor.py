@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
-URL_RE = re.compile(r"https?://[^\s<>\")]+")
+# ' and \ excluded: a URL inside a quoted string ('https://x/') must not keep its closing
+# quote, and a raw backslash never belongs in a URL — it's the start of a \n escape in
+# JSON-ish tool output, which used to glue "\nconfidence: high" onto the URL.
+URL_RE = re.compile(r"https?://[^\s<>\")'\\]+")
 # A bare scheme://host/ URL (no real path) IS just the domain — DOMAIN_RE already
 # extracts the host, so emitting a separate 'url' node only duplicates the domain dot.
 _BARE_URL_RE = re.compile(r"^https?://[^/]+/?$")
@@ -14,7 +17,9 @@ PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
 SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
 MD5_RE = re.compile(r"\b[a-fA-F0-9]{32}\b")
 IPV4_RE = re.compile(r"\b(?:25[0-5]|2[0-4]\d|[01]?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d?\d)){3}\b")
-WALLET_RE = re.compile(r"\b(?:0x[a-fA-F0-9]{40}|bc1[ac-hj-np-z02-9]{6,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
+# bech32 is valid all-lowercase OR all-UPPERCASE (BIP-173; QR codes use upper) —
+# two separate alternatives so MIXED case stays rejected as the spec requires.
+WALLET_RE = re.compile(r"\b(?:0x[a-fA-F0-9]{40}|bc1[ac-hj-np-z02-9]{6,87}|BC1[AC-HJ-NP-Z02-9]{6,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
 # Abuse/fraud domains live on cheap weird TLDs, so DOMAIN_RE captures ANY final label
 # and extract_all validates it against DOMAIN_TLDS — broad on the gTLDs abuse favors
 # (.xyz/.top/.icu/.cyou/.sbs/.cfd/.shop/.vip/...), Freenom (.tk/.ml/.ga/.cf/.gq), and
@@ -149,6 +154,12 @@ def _scan_gated(text: str, pattern: re.Pattern, entity_type: str, gates: tuple,
 # A real phone after call/contact carries '+' or formatting, which already pass.
 _PHONE_LABEL_RE = re.compile(r"\b(phone|tel|mobile|cell|fax|whatsapp|msisdn)\b",
                              re.IGNORECASE)
+# A dotted-quad IPv4 (104.21.68.184) and a date (2026-04-19) are dot/dash-separated
+# digit runs that PHONE_RE captures whole — but they are NOT phones. Without this guard
+# the separator-accept below fires, the canonicalizer strips the dots/dashes, and the
+# graph fills with bare-digit junk (1042168184 = an IP, 20260419 = a date) the analyst
+# can't pivot on. Reject both shapes BEFORE the separator-accept.
+_DATE_SHAPE_RE = re.compile(r"\d{4}[-.]\d{1,2}[-.]\d{1,2}|\d{1,2}[-.]\d{1,2}[-.]\d{4}")
 
 
 def _looks_like_phone(m) -> bool:
@@ -156,8 +167,12 @@ def _looks_like_phone(m) -> bool:
     anywhere in the ~24 chars right before the match (the structured-scrape
     bare-digit shape: 'Phone: …', 'tel no: …', 'mobile phone number: …').
     Reject everything else so unlabeled counters/IDs/timestamps don't become
-    phone nodes."""
+    phone nodes — and reject IPv4 addresses and dates outright (they are
+    dot/dash-separated digit runs that would otherwise pass the separator check)."""
     s = m.group(0)
+    stripped = s.strip()
+    if IPV4_RE.fullmatch(stripped) or _DATE_SHAPE_RE.fullmatch(stripped):
+        return False
     if "+" in s or re.search(r"[\s().-]", s):
         return True
     # search() with pos/endpos (not a sliced copy) so \b evaluates against the
@@ -177,6 +192,11 @@ def _wallet_canonical(m) -> str:
 
 def extract_all(text: str) -> list[Extracted]:
     """Run all regex extractors. Returns deduplicated list."""
+    # JSON-escaped tool output reaches this parser with LITERAL \n / \r / \t two-char
+    # sequences. Left in place, DOMAIN_RE matches starting at the escape's 'n' and forges
+    # a twin ("...\ntrumpstake.us" → ntrumpstake.us). Decode them to whitespace first —
+    # the regexes then break at the boundary the original text meant.
+    text = re.sub(r"\\[nrt]", " ", text or "")
     out: list[Extracted] = []
     out.extend(_scan(text, EMAIL_RE, "email"))
     # Skip bare scheme://host URLs — they duplicate the domain (extracted below by DOMAIN_RE).
@@ -240,6 +260,10 @@ def extract_all(text: str) -> list[Extracted]:
     out.extend(_scan(text, PROPER_NAME_RE, "person_candidate",
                      canonical_fn=lambda m: m.group(1)))
 
+    # Entity-admission contract (RCA rca-recurring-graph-noise-2026-06-11): the extractor
+    # routes through the SAME gate as the agent + cleanup, so noise blocked elsewhere can't
+    # re-enter through this door (registry/reference domains, mis-parsed junk, etc.).
+    from investigations.admission import is_admissible
     seen: set[tuple[str, str]] = set()
     deduped: list[Extracted] = []
     for e in out:
@@ -247,6 +271,10 @@ def extract_all(text: str) -> list[Extracted]:
         if key in seen:
             continue
         seen.add(key)
+        # phone_prevalidated: the extractor's _looks_like_phone already context-validated
+        # phones (a 'Phone:' label vouches a bare number); don't re-reject them value-only.
+        if not is_admissible(e.entity_type, e.canonical, phone_prevalidated=True)[0]:
+            continue
         deduped.append(e)
     return deduped
 

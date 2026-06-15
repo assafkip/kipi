@@ -200,13 +200,14 @@ def _reverse_raw_json(text: str) -> dict:
 
 class InfraAdapter(Adapter):
     slug = "infra"
+    watched_types = ('domain', 'subdomain', 'ip')
     display_name = "Infra recon (WHOIS / DNS / reverse-DNS)"
     env_var = None  # keyless — uses local whois + dig
     category = "infra"
     cost_per_call_usd = 0.0
 
     def modes(self) -> list[str]:
-        return ["whois", "dns", "reverse"]
+        return ["whois", "dns", "reverse", "dns_deep"]
 
     def run(self, query: str, mode: str | None = None,
             timeout: int = 20) -> list[EnrichmentResult]:
@@ -262,4 +263,42 @@ class InfraAdapter(Adapter):
                 raw_json=(_dns_raw_json(summary) or None),
                 confidence="medium")]
 
-        raise EnrichmentError(f"infra: unknown mode '{m}'")
+        if m == "dns_deep":
+            return self._dns_deep(target, timeout)
+
+        raise EnrichmentError(f"infra: unknown mode {mode!r}")
+
+    # ---------- mode: dns_deep (SPF/DMARC posture + AXFR + mail provider) ----------
+    def _dns_deep(self, target: str, timeout: int) -> list[EnrichmentResult]:
+        domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+        spf = _run(["dig", "+short", "TXT", domain], timeout)
+        dmarc = _run(["dig", "+short", "TXT", f"_dmarc.{domain}"], timeout)
+        mx_raw = _run(["dig", "+short", "MX", domain], timeout)
+        ns_raw = _run(["dig", "+short", "NS", domain], timeout)
+        from investigations.enrich.email_intel import identify_provider
+        mx_hosts = [ln.split()[-1].rstrip(".") for ln in mx_raw.splitlines() if ln.strip()]
+        provider = identify_provider(mx_hosts)
+        spf_line = next((ln for ln in spf.splitlines() if "v=spf1" in ln.lower()), "")
+        dmarc_line = next((ln for ln in dmarc.splitlines() if "v=dmarc1" in ln.lower()), "")
+        # AXFR attempt per NS — most refuse (intel either way); a real transfer is the find.
+        axfr_open, axfr_ns = False, ""
+        for ns in [ln.rstrip(".") for ln in ns_raw.splitlines() if ln.strip()][:3]:
+            out = _run(["dig", "+noall", "+answer", "AXFR", domain, f"@{ns}"], min(timeout, 8))
+            if out and out.count("\n") > 1:  # a zone, not a one-line refusal
+                axfr_open, axfr_ns = True, ns
+                break
+        header = EnrichmentResult(
+            result_type="document", title=f"DNS deep: {domain}",
+            summary=(f"SPF: {spf_line or '(none)'}\n"
+                     f"DMARC: {dmarc_line or '(none — no policy)'}\n"
+                     f"mail provider: {provider or 'unknown'}\n"
+                     f"AXFR: " + (f"OPEN at {axfr_ns} — zone transfer allowed!"
+                                  if axfr_open else "refused (expected)")),
+            raw_json={"domain": domain, "spf": spf_line, "dmarc": dmarc_line,
+                      "mail_provider": provider, "axfr_open": axfr_open, "axfr_ns": axfr_ns},
+            confidence="high")
+        rows = [EnrichmentResult(
+            result_type="profile", title=provider,
+            summary=f"Mail provider for {domain} (from MX records).",
+            raw_json={"promote_as": "org"}, confidence="high")] if provider else []
+        return [header] + rows

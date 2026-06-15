@@ -19,10 +19,20 @@ offline with no API call.
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+def _utcnow_str() -> str:
+    """UTC wall-clock in SQLite CURRENT_TIMESTAMP format ('YYYY-MM-DD HH:MM:SS'), so a
+    warm run's real started_at/finished_at are directly comparable to the column default."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def warm_session_enabled() -> bool:
@@ -115,6 +125,22 @@ class WarmSession:
         reads as ONE continuous turn that changed direction mid-burst."""
         from investigations.agent import investigator as inv
 
+        try:
+            return await self._collect_inner(task, deadline, on_step, cancel, redirect, inv)
+        except asyncio.CancelledError:
+            # HARD cancel (the +30s submit backstop's future.cancel(), or a watcher) raises
+            # CancelledError out of the inner await — it bypasses the cooperative cap path and
+            # its _safe_interrupt(). Without this handler the chat stream closed while the
+            # agent subprocess kept running ORPHANED (the lifecycle bug). Interrupt the live
+            # agent before re-raising. Shielded so the interrupt completes on the persistent
+            # warm loop even though THIS coroutine is being torn down.
+            try:
+                await asyncio.shield(self._safe_interrupt())
+            except asyncio.CancelledError:
+                pass  # the shielded interrupt task still runs to completion on the loop
+            raise
+
+    async def _collect_inner(self, task, deadline, on_step, cancel, redirect, inv) -> dict:
         texts: list[str] = []
         tools: list[str] = []
         steps: list[dict] = []
@@ -122,6 +148,17 @@ class WarmSession:
         n = 0
         capped = False
         cap_reason = None
+        # Run accounting (4pa-lifecycle): the warm path used to discard the SDK
+        # ResultMessage payload (raw={}), so cost/turns/wall-clock were invisible in
+        # enrichment_runs (started_at==finished_at, cost_usd NULL). Capture them here.
+        started_at = _utcnow_str()
+        t0 = time.monotonic()
+        cost_usd = None
+        cost_estimated = False  # true when cost_usd is a price-table estimate, not the
+        #                         exact SDK figure (a STOPPED/turn-limit turn has no Result)
+        usage_acc = {"input_tokens": 0, "output_tokens": 0}  # accumulated per-message usage
+        turns = None
+        duration_ms = None
         saw_result = False  # a healthy turn ends on the agent's final result message;
         #                     ending WITHOUT one means the max-turns backstop cut it off.
         redirected = False
@@ -136,9 +173,14 @@ class WarmSession:
             try:
                 while True:
                     # Cooperative Stop wins over redirect: salvage the partial (capped).
+                    # Interrupt the LIVE tool RIGHT HERE (mirroring the redirect path), so an
+                    # in-flight browser/web_search call is aborted via the SDK control channel
+                    # immediately — not after it resolves (the ~30s Stop lag). The post-loop
+                    # `if capped: _safe_interrupt()` then no-ops on the already-interrupted turn.
                     if cancel is not None and cancel.is_set():
                         capped = True
                         cap_reason = "stopped"
+                        await self._safe_interrupt()
                         break
                     remaining = (end - time.monotonic()) if end is not None else None
                     if remaining is not None and remaining <= 0:
@@ -176,7 +218,7 @@ class WarmSession:
                         break
                     next_task = None
                     before = len(steps)
-                    n = _absorb_message(message, texts, tools, steps, pending, n, inv)
+                    n = _absorb_message(message, texts, tools, steps, pending, n, inv, usage_acc)
                     if on_step:
                         # Emit only the NEW steps this message appended (0, 1, or many).
                         # A tool_result message mutates a pending step in place (no
@@ -189,6 +231,11 @@ class WarmSession:
                                 pass
                     if _is_result(message):
                         saw_result = True
+                        # The SDK ResultMessage carries the run's real cost + turn count +
+                        # duration — pull them so the warm run is no longer cost-blind.
+                        cost_usd = getattr(message, "total_cost_usd", None)
+                        turns = getattr(message, "num_turns", None)
+                        duration_ms = getattr(message, "duration_ms", None)
                         break
             finally:
                 # A break on cancel/deadline/redirect can leave a pending __anext__ —
@@ -222,19 +269,37 @@ class WarmSession:
             cap_reason = "turn_limit"
         if capped:
             await self._safe_interrupt()
+        # No ResultMessage (Stopped or turn-limit-cut) → exact cost is unavailable. Estimate
+        # it from accumulated token usage so the turn reports a real ~$ figure, not null
+        # (founder: a stopped turn still cost money — show it, flagged as an estimate).
+        if cost_usd is None and (usage_acc["input_tokens"] or usage_acc["output_tokens"]):
+            cost_usd = inv.estimate_cost_usd(
+                usage_acc["input_tokens"], usage_acc["output_tokens"], inv.AGENT_MODEL)
+            cost_estimated = True
         return {"ok": True, "result_text": "\n".join(texts), "tools": tools,
                 "steps": steps, "capped": capped, "cap_reason": cap_reason,
-                "redirected": redirected}
+                "redirected": redirected,
+                # Run accounting so the landing path can write real cost/turns/wall-clock.
+                "cost_usd": cost_usd, "cost_estimated": cost_estimated, "turns": turns,
+                "started_at": started_at, "finished_at": _utcnow_str(),
+                "elapsed_s": round(time.monotonic() - t0, 2),
+                "duration_ms": duration_ms}
 
-    async def _safe_interrupt(self) -> None:
-        """Best-effort: cleanly end the in-flight turn so the next one starts fresh."""
+    async def _safe_interrupt(self) -> bool:
+        """End the in-flight turn so the agent stops (and the next turn starts fresh).
+        Returns True if the interrupt was sent. A FAILED interrupt is logged, never
+        swallowed silently — a silent failure is exactly how the agent kept running
+        orphaned after the chat said done (the lifecycle bug)."""
         interrupt = getattr(self._client, "interrupt", None)
         if interrupt is None:
-            return
+            return False
         try:
             await interrupt()
-        except Exception:
-            pass
+            return True
+        except Exception as exc:
+            log.warning("warm interrupt FAILED for case %s: %s — agent may still be "
+                        "running; restart the session if it wedges", self.case_slug, exc)
+            return False
 
     async def close(self) -> None:
         """Disconnect the client and mark closed. Idempotent — no zombie leak."""
@@ -254,11 +319,23 @@ def _is_result(message) -> bool:
     )
 
 
-def _absorb_message(message, texts, tools, steps, pending, n, inv) -> int:
+def _absorb_message(message, texts, tools, steps, pending, n, inv, usage=None) -> int:
     """Fold one SDK message into texts + tools + the step trail (same shape as the
     cold _extract_steps, so _attribute_findings / _salvage_from_trail work on it).
     Duck-typed: text block -> reasoning step; tool_use -> tool step; tool_result ->
-    fills its tool step's result by tool_use_id. Returns the updated step counter."""
+    fills its tool step's result by tool_use_id. Returns the updated step counter.
+
+    When `usage` (a mutable accumulator dict) is passed, this also folds the message's
+    token usage into it (mirrors llm/client.py:67-70) so a STOPPED turn — which never
+    emits a ResultMessage with the exact cost — can still report an estimated $ spend
+    instead of a null bill."""
+    if usage is not None:
+        u = getattr(message, "usage", None)
+        if isinstance(u, dict):
+            usage["input_tokens"] += (u.get("input_tokens", 0) or 0) \
+                + (u.get("cache_read_input_tokens", 0) or 0) \
+                + (u.get("cache_creation_input_tokens", 0) or 0)
+            usage["output_tokens"] += (u.get("output_tokens", 0) or 0)
     for block in getattr(message, "content", None) or []:
         text = getattr(block, "text", None)
         name = getattr(block, "name", None)
@@ -399,6 +476,21 @@ def _warm_bounded() -> bool:
     return os.environ.get("KIPI_WARM_DEEP", "").strip().lower() in ("0", "false", "no")
 
 
+def _warm_tool_budget() -> int:
+    """Tool-call circuit-breaker for a warm turn (default 150; a live deep dig runs ~30-60
+    tool calls). This is kipi's equivalent of 4_points' 50-call PreToolUse breaker — but
+    injected through ClaudeAgentOptions, because the warm agent runs with setting_sources=[]
+    and never loads repo hooks (the reason backfilling .claude/rules can't leash it). It is a
+    runaway backstop, NOT the control: a normal dig concludes well under it, and on the cap
+    the agent is told to emit findings + surface unreached entities as leads (graceful, never
+    a hard kill — founder: 'budget the scope, never kill mid-investigation').
+    KIPI_WARM_TOOL_BUDGET=0 disables it."""
+    try:
+        return max(0, int(os.environ.get("KIPI_WARM_TOOL_BUDGET", "150")))
+    except ValueError:
+        return 150
+
+
 def _warm_scope_kwargs(case_slug: str) -> dict:
     """The bound-related ClaudeAgentOptions kwargs for a warm case session: the persona and,
     when bounded with a non-empty roster, the SAME PreToolUse scope hook the cold path uses
@@ -409,18 +501,36 @@ def _warm_scope_kwargs(case_slug: str) -> dict:
     The PreToolUse hook fires regardless of permission mode — same mechanism, live-verified
     on the cold path. Returns {system_prompt, settings, env} to merge into the options.
 
-    Pure + side-effect-light (writes temp files only when bounded) so it's unit-testable
-    without constructing a real SDK client."""
+    A tool-call BUDGET circuit-breaker (_warm_tool_budget) is attached on EVERY path —
+    bounded or deep — because the warm agent loads no repo hooks (setting_sources=[]), so
+    this injected PreToolUse hook is the only deterministic leash that reaches it.
+
+    Pure + side-effect-light (writes temp files only when a hook is attached) so it's
+    unit-testable without constructing a real SDK client."""
     from investigations.agent import investigator as inv
     env = dict(inv._agent_key_env())
+    budget = _warm_tool_budget()
+
+    def _budget_only(persona):
+        """Deep/unbounded run: no scope cage, but still a tool-budget breaker."""
+        if budget > 0:
+            settings_path, budget_path = inv._build_budget_settings(budget)
+            env["KIPI_BUDGET_FILE"] = budget_path
+            return {"system_prompt": persona, "settings": settings_path, "env": env}
+        return {"system_prompt": persona, "settings": None, "env": env}
+
     if not _warm_bounded():
-        return {"system_prompt": inv.CASE_PERSONA, "settings": None, "env": env}
+        return _budget_only(inv.CASE_PERSONA)
     roster = inv._case_bound_roster_for_slug(case_slug)
     if not roster:
         # Nothing to bound to yet (no entities extracted) — run unbounded, like cold.
-        return {"system_prompt": inv.CASE_PERSONA, "settings": None, "env": env}
-    settings_path, roster_path = inv._build_scope_settings(roster)
+        return _budget_only(inv.CASE_PERSONA)
+    # Bounded: scope hook AND budget hook together (the cold bounded launch's full guard set).
+    settings_path, roster_path, budget_path = inv._build_guard_settings(
+        roster, tool_budget=budget or None)
     env["KIPI_SCOPE_ROSTER"] = roster_path
+    if budget_path:
+        env["KIPI_BUDGET_FILE"] = budget_path
     return {"system_prompt": inv.CASE_PERSONA_BOUNDED, "settings": settings_path, "env": env}
 
 

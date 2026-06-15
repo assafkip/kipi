@@ -104,7 +104,7 @@ def main():
     # Direct is_pivotable checks (the noise rules).
     assert alerts.is_pivotable("20260327", "phone") is False, "bare-digit date slipped through"
     assert alerts.is_pivotable("2026-03-27", "phone") is False, "separated date slipped through"
-    assert alerts.is_pivotable("https://t.me/order403", "url") is False, "platform URL slipped through"
+    assert alerts.is_pivotable("https://t.me/examplegroup", "url") is False, "platform URL slipped through"
     assert alerts.is_pivotable("x", "handle", "role:noise — junk") is False, "role:noise slipped through"
     assert alerts.is_pivotable("@realactor", "handle") is True, "real actor wrongly excluded"
 

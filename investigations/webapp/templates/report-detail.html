@@ -34,7 +34,7 @@
               {% for c in cases %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
             </select>
             <button :disabled="busy || !moveTo"
-                    @click="busy = true; moveErr = ''; fetch('/api/report/{{ report.id }}/move', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({case: moveTo}) }).then(r => r.json()).then(d => { if (d.error) { moveErr = d.error; busy = false; } else { window.location = '/reports/{{ report.id }}'; } })"
+                    @click="busy = true; moveErr = ''; fetch('/api/report/{{ report.id }}/move', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({case: moveTo}) }).then(r => r.json()).then(d => { if (d.error) { moveErr = d.error; busy = false; } else { window.kipiNav.go('/reports/{{ report.id }}'); } })"
                     class="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-40">
               <span x-show="!busy">Move</span><span x-show="busy" x-cloak>…</span>
             </button>
@@ -49,7 +49,7 @@
         <template x-if="confirming">
           <span class="flex items-center gap-1.5">
             <span class="text-xs text-ink-muted">Remove completely?</span>
-            <button :disabled="busy" @click="busy = true; fetch('/api/report/{{ report.id }}/delete', { method: 'POST' }).then(r => r.json()).then(d => { window.location = '/reports'; })"
+            <button :disabled="busy" @click="busy = true; fetch('/api/report/{{ report.id }}/delete', { method: 'POST' }).then(r => r.json()).then(d => { window.kipiNav.go('/reports'); })"
                     class="text-xs px-2.5 py-1 rounded bg-sev-high text-white hover:opacity-90 disabled:opacity-50">
               <span x-show="!busy">Delete</span><span x-show="busy" x-cloak>…</span>
             </button>

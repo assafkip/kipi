@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 
 from investigations.storage import db
-from investigations.enrich.registry import get_adapter, all_adapters
-from investigations.enrich import virustotal, infra
+from investigations.enrich.registry import get_adapter, all_adapters, _REGISTRY
+from investigations.enrich import virustotal, infra, runner
 
 NEW = ["virustotal", "abusech", "crtsh", "infra"]
 KEYLESS = ["crtsh", "infra"]
@@ -64,6 +64,53 @@ def main():
         # Wayback / archive.org removed (doesn't work via the agent's fetch path).
         assert "wayback" not in rows, "wayback must not be seeded after removal"
         print("  ok  wayback not seeded (removed)")
+
+    # 6) FULL coverage guard (issue enrich-seed-from-registry). The catalog is
+    # seeded FROM the registry, so EVERY registry adapter must have a row. This
+    # is the choke-point the old hand-list lacked: it seeded 21 of 39 adapters,
+    # so `phone` (and 17 others) FK-failed in start_run -> a 500 -> the graph's
+    # "Could not reach the server." If a future adapter is added to the registry
+    # without a seed row, this assertion goes red.
+    def _unseeded(conn):
+        seeded = {r["slug"] for r in conn.execute("SELECT slug FROM osint_providers")}
+        return set(_REGISTRY) - seeded
+
+    # (b) key == adapter.slug invariant. The seed keys osint_providers by the
+    # registry KEY; dispatch (start_run / recipes) keys off the same key. If a
+    # key ever diverged from its adapter.slug the FK gap could reopen, so lock
+    # the invariant the seed depends on.
+    mismatched = {k: a.slug for k, a in _REGISTRY.items() if k != a.slug}
+    assert not mismatched, f"registry key != adapter.slug: {mismatched}"
+    print("  ok  registry key == adapter.slug for all adapters")
+
+    # (a) every registry adapter is seeded on a fresh DB, and (d) a runner-level
+    # check that a previously-missing slug no longer raises the FK IntegrityError.
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "cov.db"
+        db.init_db(path)
+        with db.connect(path) as conn:
+            missing = _unseeded(conn)
+            assert not missing, f"registry adapters missing an osint_providers row: {sorted(missing)}"
+            print(f"  ok  all {len(_REGISTRY)} registry adapters seeded (no FK gap)")
+            rid = runner.start_run(conn, "phone", "+14155552671")
+            assert isinstance(rid, int) and rid > 0, "start_run('phone') did not return a run id"
+            print("  ok  start_run('phone') succeeds (no FOREIGN KEY IntegrityError)")
+
+    # (c) negative self-test: prove the coverage guard has teeth. On a fresh DB,
+    # delete one seeded provider and assert _unseeded() reports exactly that gap.
+    # If a deleted seed is NOT detected, the guard is asleep and the test must
+    # fail. (Fresh DB / no enrichment_runs row, so the DELETE is FK-clean.)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "neg.db"
+        db.init_db(path)
+        with db.connect(path) as conn:
+            assert not _unseeded(conn), "precondition: fresh DB must be fully seeded"
+            conn.execute("DELETE FROM osint_providers WHERE slug='phone'")
+            conn.commit()
+            assert _unseeded(conn) == {"phone"}, (
+                "negative self-test FAILED: deleting the 'phone' seed was not "
+                "detected by the coverage check - the guard has no teeth")
+        print("  ok  negative self-test: coverage guard detects a deleted seed")
 
     print("\nPASS: test_enrich_adapters")
 

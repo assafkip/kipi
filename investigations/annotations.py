@@ -3,7 +3,7 @@ AI-generated vault dossier so regeneration never wipes analyst work.
 """
 from __future__ import annotations
 
-from investigations.storage import db
+from investigations import admission
 
 
 def _has(conn) -> bool:
@@ -39,6 +39,18 @@ def set_notes(conn, entity_id: int, notes: str | None, author: str | None = None
 
 
 def set_dossier_override(conn, entity_id: int, body: str | None, author: str | None = None) -> None:
+    # Text-admission gate (issue text-admission-gate): a tool-less model prompted
+    # to "investigate" can role-play a fake <tool_call>/<tool_response> transcript
+    # and it would land here as a finding. Strip the transcript shape from EVERY
+    # write (author-independent — the app.py:5118 machine note is mislabeled
+    # "analyst (from finding)"). If sanitizing reduced a non-empty body to a
+    # vacuous shell (a pure bluff), SKIP the write so the prior dossier stands —
+    # never overwrite a real dossier with an empty one.
+    if body:
+        cleaned, removed = admission.sanitize_model_text(body)
+        if removed and admission.text_is_effectively_blank(cleaned):
+            return
+        body = cleaned
     _ensure_row(conn, entity_id)
     conn.execute(
         "UPDATE entity_annotations SET dossier_override = ?, dossier_author = ?, "

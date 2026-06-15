@@ -102,6 +102,17 @@ def test_phone_rejects_bare_numeric_runs():
     # ...but a label-suffix of an unrelated word must NOT count (Hotel/recall).
     decoy = _types("Hotel: 000000001  recall: 000000002")
     _check("word-suffix decoy labels rejected", not decoy.get("phone"))
+    # IPv4 + dates are dot/dash-separated digit runs — PHONE_RE captures them whole and
+    # the separator-accept used to pass them, then the canonicalizer stripped the
+    # separators leaving bare-digit junk (104.21.68.184 -> 1042168184; 2026-04-19 ->
+    # 20260419). They must NEVER be phones.
+    infra = _types("resolves to 104.21.68.184 and 172.67.197.209, first seen 2026-04-19, "
+                   "dedicated 38.46.220.132")
+    ip_phones = infra.get("phone", [])
+    _check("an IPv4 is not a phone", not ip_phones)
+    _check("a date is not a phone", "20260419" not in ip_phones)
+    # IPv4 still extracted as the IP it is (not lost — just typed correctly).
+    _check("IPv4 still extracted as ip", "104.21.68.184" in infra.get("ip", []))
 
 
 def test_base58_wallet_case_preserved_no_forged_twin():
@@ -116,6 +127,17 @@ def test_base58_wallet_case_preserved_no_forged_twin():
     _check("bech32 (already lowercase) kept", "bc1qqu75xepdcu377lr" in wallets)
 
 
+def test_uppercase_bech32_matched_and_lowercased():
+    # bech32 is valid all-UPPERCASE too (BIP-173 — QR codes render it that way).
+    # Match it and canonicalize to lowercase like the rest of the family.
+    # MIXED case is invalid bech32 and must stay rejected.
+    t = _types("btc BC1QQU75XEPDCU377LR sent funds")
+    wallets = t.get("crypto_wallet", [])
+    _check("uppercase bech32 matched + lowercased", "bc1qqu75xepdcu377lr" in wallets)
+    mixed = _types("ref Bc1Qqu75xePdcu377lr")
+    _check("mixed-case bech32 rejected", not mixed.get("crypto_wallet"))
+
+
 def main():
     test_new_fingerprint_types()
     test_gating_suppresses_false_positives()
@@ -123,6 +145,7 @@ def main():
     test_pivot_templates_exist()
     test_phone_rejects_bare_numeric_runs()
     test_base58_wallet_case_preserved_no_forged_twin()
+    test_uppercase_bech32_matched_and_lowercased()
     print("\nPASS: test_extractor_pivots")
 
 

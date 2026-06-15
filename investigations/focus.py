@@ -13,7 +13,6 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from investigations.storage import db
 from investigations.llm import client as llm
 
 TOP_N = 12

@@ -16,9 +16,42 @@
   <div x-show="open" x-cloak @keydown.escape="open=false"
        class="mb-2 w-[24rem] max-w-[calc(100vw-2rem)] bg-bg-card border border-bg-border rounded-xl shadow-card flex flex-col" style="height:32rem">
   {% endif %}
+    {% if not docked %}
     <div class="flex items-center justify-between px-3.5 h-11 border-b border-bg-border shrink-0">
       <div class="text-sm font-semibold text-ink">Investigator</div>
-      {% if not docked %}<button @click="open=false" class="text-ink-muted hover:text-ink">✕</button>{% endif %}
+      <button @click="open=false" class="text-ink-muted hover:text-ink">✕</button>
+    </div>
+    {% endif %}
+    <!-- Tradecraft step bar: gates (✓/○ Scope, Challenge, Premortem) + helper steps.
+         Code-enforced state, soft nudge only. Shows only when a single case is active. -->
+    <div x-show="tradecraft.length" x-cloak
+         class="px-2.5 py-1.5 border-b border-bg-border flex flex-wrap gap-1 shrink-0">
+      <template x-for="s in tradecraft" :key="s.key">
+        <button @click="stepClick(s)" :disabled="busy" :title="s.blurb"
+                class="text-[11px] px-2 py-0.5 rounded border transition-colors disabled:opacity-50 hover:border-accent hover:text-accent"
+                :class="s.kind === 'gate' && s.done
+                  ? 'border-conf-high/40 bg-conf-high/10 text-conf-high'
+                  : 'border-bg-border bg-bg-soft text-ink-muted'">
+          <span x-show="s.kind === 'gate'" x-text="s.done ? '✓ ' : '○ '"></span><span x-text="s.icon + ' ' + s.label"></span>
+        </button>
+      </template>
+    </div>
+    <!-- Scope capture (inline): the analyst feeds the framing, it becomes the scope gate. -->
+    <div x-show="scopeForm.open" x-cloak
+         class="px-2.5 py-2 border-b border-bg-border space-y-1.5 shrink-0 bg-bg-soft/40">
+      <input x-model="scopeForm.question" placeholder="Core question — what are we trying to answer?"
+             class="w-full text-xs px-2 py-1 rounded border border-bg-border bg-bg-card">
+      <input x-model="scopeForm.hypotheses" placeholder="Hypotheses — what do you suspect?"
+             class="w-full text-xs px-2 py-1 rounded border border-bg-border bg-bg-card">
+      <input x-model="scopeForm.proof" placeholder="What counts as proof?"
+             class="w-full text-xs px-2 py-1 rounded border border-bg-border bg-bg-card">
+      <div class="flex justify-end gap-1.5">
+        <button @click="scopeForm.open = false" class="text-[11px] px-2 py-0.5 text-ink-muted hover:text-ink">Cancel</button>
+        <button @click="submitScope()" :disabled="scopeForm.busy || !scopeForm.question.trim()"
+                class="text-[11px] px-3 py-0.5 rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-50">
+          <span x-show="!scopeForm.busy">Save scope</span><span x-show="scopeForm.busy" x-cloak>…</span>
+        </button>
+      </div>
     </div>
     <div x-ref="box" @click="onMsgClick($event)" class="flex-1 overflow-y-auto px-3.5 py-3 space-y-2 text-sm">
       <div x-show="!msgs.length" class="text-ink-faint leading-relaxed">
@@ -35,6 +68,13 @@
           <span x-show="m.role !== 'aside' && m.role !== 'you' && m.role !== 'node' && m.role !== 'edge' && m.role !== 'runs'"
                 class="markdown inline-block rounded-lg px-3 py-2 max-w-[90%] text-left bg-bg-soft text-ink border border-bg-border"
                 x-html="md(m.text)"></span>
+          <!-- Spend/time/steps for an agent turn — makes cost visible (the "expensive" sin). -->
+          <div x-show="(m.cost_usd != null || m.step_count) && m.role !== 'you' && m.role !== 'aside' && m.role !== 'node' && m.role !== 'edge'"
+               x-cloak class="text-[10px] text-ink-faint mt-0.5 px-1">
+            <template x-if="m.cost_usd != null"><span x-text="(m.cost_estimated ? '~$' : '$') + Number(m.cost_usd).toFixed(3) + (m.cost_estimated ? ' est.' : '')"></span></template>
+            <template x-if="m.elapsed_s != null"><span> · <span x-text="Math.round(m.elapsed_s) + 's'"></span></span></template>
+            <template x-if="m.step_count"><span> · <span x-text="m.step_count + ' steps'"></span></span></template>
+          </div>
           <!-- Your own messages stay literal (no surprise formatting of what you typed). -->
           <span x-show="m.role === 'you'"
                 class="inline-block rounded-lg px-3 py-2 max-w-[90%] whitespace-pre-wrap text-left bg-accent text-white"
@@ -260,15 +300,84 @@ function caseChat(docked) {
     invMsg: '', invTimer: null,
     lastHidden: null,
     providers: [],          // enrich providers for the node card's Enrich dropdown
+    tradecraft: [],         // tradecraft checklist (gates + helpers) for the step bar
+    scopeForm: { open: false, question: '', hypotheses: '', proof: '', busy: false },
 
     // Docked (graph split-view) is always open with no bubble to toggle, so load the
     // transcript at init instead of on first toggle. Register __kipiChat so the graph
     // canvas opens a tapped node HERE (a node card) instead of a side panel.
     init() {
       if (this.docked) { this.loadTranscript(); this.loadProviders(); }
-      window.__kipiChat = { showNode: (d) => this.showNode(d), showEdge: (d) => this.showEdge(d) };
+      this.loadTradecraft();   // load the step bar on every surface (docked + bubble)
+      window.__kipiChat = { showNode: (d) => this.showNode(d), showEdge: (d) => this.showEdge(d),
+        // The graph drops a cluster "what is this?" read in here (one chat, every surface).
+        pushAside: (t) => { this.msgs.push({ role: 'aside', text: t }); this.scroll(); },
+        pushAgent: (t) => { this.open = true; this.msgs.push({ role: 'agent', text: t }); this.scroll(); } };
       window.addEventListener('beforeunload', () => { window.__kipiChat = null; });
       this.reconnectRunningJob();   // re-attach to an in-flight warm run after reload / nav
+    },
+
+    // --- Tradecraft gates (Scope/Challenge/Premortem) + helpers, run from the chat. ---
+    // The chat is rule-free, so these steps are guided + tracked HERE, with code-enforced
+    // state (a step is done when its server-side artifact exists). Soft nudge, never blocks.
+    async loadTradecraft() {
+      try { this.tradecraft = (await fetch('/api/tradecraft').then(r => r.json())).steps || []; }
+      catch (e) {}
+    },
+    stepClick(s) {
+      if (s.kind === 'helper') return this.runHelper(s);
+      if (s.key === 'scope') { this.scopeForm.open = !this.scopeForm.open; return; }
+      return this.runGate(s);   // challenge | premortem
+    },
+    // Helper buttons just steer the investigator with a templated message (no gate).
+    runHelper(s) {
+      const prompts = {
+        timeline: 'Build a chronological timeline of this case from the findings so far.',
+        target: 'Profile the highest-value target in this case in depth.',
+        reality_check: 'Reality-check the current picture: where am I overreaching, what is asserted beyond the evidence, and what is the weakest link?'
+      };
+      this.input = prompts[s.key] || ('Run ' + s.label);
+      this.send();
+    },
+    async submitScope() {
+      if (!this.scopeForm.question.trim()) { this.scopeForm.open = true; return; }
+      this.scopeForm.busy = true;
+      try {
+        const r = await fetch('/api/tradecraft/scope', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: this.scopeForm.question,
+            hypotheses: this.scopeForm.hypotheses, proof: this.scopeForm.proof })
+        }).then(x => x.json());
+        if (r.error) { this.msgs.push({ role: 'agent', text: r.error }); }
+        else {
+          this.tradecraft = r.steps || this.tradecraft;
+          this.scopeForm.open = false;
+          this.msgs.push({ role: 'aside', text: 'scope captured' });
+          this.msgs.push({ role: 'agent', text: r.content });
+          this.scroll();
+        }
+      } catch (e) { this.msgs.push({ role: 'agent', text: 'Could not save scope.' }); }
+      this.scopeForm.busy = false;
+    },
+    // Challenge / Premortem: run the analysis over the case findings, show it in the chat.
+    async runGate(s) {
+      if (this.busy) return;
+      this.busy = true;
+      this.msgs.push({ role: 'aside', text: 'running ' + s.label + '…' });
+      this.scrollDown();
+      try {
+        const r = await fetch('/api/tradecraft/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ step: s.key })
+        }).then(x => x.json());
+        if (r.error) { this.msgs.push({ role: 'agent', text: r.error }); }
+        else {
+          this.tradecraft = r.steps || this.tradecraft;
+          this.msgs.push({ role: 'agent', text: '**' + s.label + '**\n\n' + (r.content || '') });
+          this.scroll();
+        }
+      } catch (e) { this.msgs.push({ role: 'agent', text: 'Could not run ' + s.label + '.' }); }
+      this.busy = false;
     },
 
     // If a warm investigation is already running for this case (the analyst reloaded or
@@ -508,13 +617,15 @@ function caseChat(docked) {
         }).then(x => x.json());
         if (r.mode === 'job') { await this.pollJob(); return; }
         // synchronous path: grounded answer / router reply / action
-        this.msgs.push({ role: 'agent', text: r.reply || '(no reply)', sources: r.sources || [] });
+        this.msgs.push({ role: 'agent', text: r.reply || '(no reply)', sources: r.sources || [],
+                         cost_usd: r.cost_usd, cost_estimated: r.cost_estimated,
+                         elapsed_s: r.elapsed_s, step_count: r.step_count });
         if (g && g.applyDeltas) g.applyDeltas(r.deltas);
         if (r.deltas && r.deltas.undo) this.lastHidden = r.deltas.undo;
         if (r.action && r.action.type === 'new_case') {
           // Warm run → the docked chat on /graph reconnects to the live trail itself
           // (reconnectRunningJob); only the old run-panel job needs watch=1.
-          window.location.href = '/graph' + (r.action.ran && !r.action.warm ? '?watch=1' : '');
+          window.kipiNav.go('/graph' + (r.action.ran && !r.action.warm ? '?watch=1' : ''));
           return;
         }
         if (r.action && r.action.type === 'investigate') this.startInvestigation(r.action);
@@ -542,16 +653,6 @@ function caseChat(docked) {
       return (head + arg).slice(0, 120);
     },
 
-    // Drop server-extracted entities onto the graph as provisional "discovered" nodes.
-    // Graph page only (window.__kipiGraph present); elsewhere a harmless no-op. reload()
-    // at turn end rebuilds from the DB, replacing these with whatever actually landed.
-    discover(s) {
-      const g = this.graph();
-      if (!g || !g.addProvisional || !s.discovery) return;
-      const d = s.discovery;
-      if (d.anchor || (d.found && d.found.length)) g.addProvisional(d);
-    },
-
     // Warm turn → stream the live step trail over SSE; fall back to status polling.
     async pollJob() {
       this.jobActive = true;
@@ -577,14 +678,15 @@ function caseChat(docked) {
           try { const s = JSON.parse(e.data);
             this.upsertStep(s);
             this.step = this.stepLine(s);
-            this.discover(s);
           } catch (_) {}
         });
         es.addEventListener('done', (e) => {
           sawDone = true;
           let s = {}; try { s = JSON.parse(e.data); } catch (_) {}
           if (s.status && s.status !== 'idle')
-            this.msgs.push({ role: 'agent', text: s.reply || '(no reply)' });
+            this.msgs.push({ role: 'agent', text: s.reply || '(no reply)',
+                             cost_usd: s.cost_usd, cost_estimated: s.cost_estimated,
+                             elapsed_s: s.elapsed_s, step_count: s.step_count });
           const g = this.graph();
           if (s.graph_touched && g && g.reload) g.reload();
           es.close();
@@ -604,7 +706,7 @@ function caseChat(docked) {
         await new Promise(r => setTimeout(r, 1000));
         const s = await fetch('/api/chat/status').then(x => x.json());
         const steps = s.steps || [];
-        for (const st of steps) { this.upsertStep(st); this.discover(st); }
+        for (const st of steps) this.upsertStep(st);
         if (steps.length) {
           this.step = this.stepLine(steps[steps.length - 1]);
         }

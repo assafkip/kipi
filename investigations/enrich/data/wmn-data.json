@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "source": "WhatsMyName (WebBreacher/WhatsMyName) — curated snapshot",
+    "note": "Vendored subset, re-vendor periodically. Used by username.py for data-driven existence (e_string) / missing (m_string) validators. Curated _SITES take precedence on a name clash; a bare 200 is never 'found'.",
+    "vendored": "2026-06-12"
+  },
+  "sites": [
+    {"name": "About.me", "uri_check": "https://about.me/{account}", "e_string": "<title>", "m_string": "Page Not Found"},
+    {"name": "Pinterest", "uri_check": "https://www.pinterest.com/{account}/", "m_string": "Sorry! We couldn't find"},
+    {"name": "Replit", "uri_check": "https://replit.com/@{account}", "m_string": "404 — Page not found"},
+    {"name": "SoundCloud", "uri_check": "https://soundcloud.com/{account}", "m_string": "We can't find that user"},
+    {"name": "Steam", "uri_check": "https://steamcommunity.com/id/{account}", "m_string": "The specified profile could not be found"},
+    {"name": "Vimeo", "uri_check": "https://vimeo.com/{account}", "m_string": "Sorry, we couldn't find that page"},
+    {"name": "Wordpress", "uri_check": "https://{account}.wordpress.com/", "m_string": "doesn't exist"}
+  ]
+}

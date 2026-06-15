@@ -249,7 +249,7 @@
         }).then(d => {
           if (!d) return;                       // approve failed; already surfaced
           if (d.error) { this.msg = d.error; this.busy = false; return; }
-          window.location = '/reports';         // live progress panel takes over
+          window.kipiNav.go('/reports');         // live progress panel takes over
         }).catch(() => { this.msg = 'Failed — try again'; this.busy = false; });
       },
     };

@@ -22,6 +22,7 @@ MODEL_BY_MODE = {
 
 class PerplexityAdapter(Adapter):
     slug = "perplexity"
+    watched_types = ("domain", "subdomain", "url", "ip", "email", "phone", "handle", "person", "org", "telegram_channel", "crypto_wallet", "wallet", "asn", "indicator", "username", "fingerprint", "hash_sha256", "hash_md5")  # type-agnostic research tier: full investigable set (deliberate)
     display_name = "Perplexity Sonar / Deep / Reasoning"
     env_var = "PERPLEXITY_API_KEY"
     category = "search"

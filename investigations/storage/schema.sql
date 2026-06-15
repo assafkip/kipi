@@ -197,3 +197,19 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_turns_case ON chat_turns(investigation, id);
+
+-- Tradecraft gates run from the chat (Scope / Challenge / Premortem are tracked gates;
+-- Timeline / Target / Reality-check are helper steps). A step is "done" when its row
+-- exists — code-enforced state the warm agent can't skip, surfaced as a checklist in the
+-- chat and a soft nudge at brief time. One current artifact per (case, step); re-running
+-- overwrites it.
+CREATE TABLE IF NOT EXISTS case_tradecraft (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    investigation TEXT NOT NULL,
+    step TEXT NOT NULL,
+    content TEXT,
+    analyst TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(investigation, step)
+);
+CREATE INDEX IF NOT EXISTS idx_tradecraft_case ON case_tradecraft(investigation);

@@ -179,12 +179,10 @@ def test_web_path_routing_is_analyst_driven(mp):
     # bounded pass; deep=True re-seeds multi-pass. The old per-entity volley→crew fan-out
     # is no longer the default.
     from investigations.agent import swarm
-    called = {"agentic": 0, "shallow": 0, "deep_loop": 0, "passes": []}
+    called = {"agentic": 0, "deep_loop": 0, "passes": []}
     def _agentic(conn, case, on_event=None, max_passes=1, **k):
         called["agentic"] += 1; called["passes"].append(max_passes); return {"ok": True}
     mp.setattr(investigator, "investigate_case_agentic", _agentic)
-    mp.setattr(swarm, "investigate_case",
-               lambda conn, case, on_event=None, **k: called.__setitem__("shallow", called["shallow"] + 1) or {"ok": True})
     mp.setattr(swarm, "deep_investigate",
                lambda *a, **k: called.__setitem__("deep_loop", called["deep_loop"] + 1) or {"ok": True})
     import contextlib
@@ -193,8 +191,8 @@ def test_web_path_routing_is_analyst_driven(mp):
         yield None
     mp.setattr(app_module.db, "connect", _noconn)
     app_module._investigate_swarm("cx", shallow=False)                 # default
-    _check("default → ONE bounded agent (no fan-out), not the volley",
-           called["agentic"] == 1 and called["shallow"] == 0)
+    _check("default → ONE bounded agent (no fan-out)",
+           called["agentic"] == 1)
     _check("default loops to completeness (CASE_MAX_PASSES backstop, not a single hop)",
            called["passes"] == [investigator.CASE_MAX_PASSES])
     app_module._investigate_swarm("cx", shallow=False, deep=True)      # opt-in: deep multi-pass

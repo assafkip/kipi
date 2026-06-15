@@ -154,7 +154,7 @@ function uploadView() {
         this.done = 'Ingested ' + d.ingested + ' report(s)' +
                     (d.open_contradictions ? ', ' + d.open_contradictions + ' correction(s) to review' : '') + '. Opening…';
         // Land in the case the files were filed under (creates the switch if new).
-        setTimeout(() => { window.location = '/select-case/' + d.case; }, 900);
+        setTimeout(() => { window.kipiNav.go('/select-case/' + d.case); }, 900);
       } catch (e) {
         this.error = 'Upload failed.'; this.busy = false;
       }
@@ -173,7 +173,7 @@ function uploadView() {
         if (d.error) { this.error = d.error; this.busy = false; return; }
         if (!d.ingested) { this.error = 'Nothing extracted from the notes.'; this.busy = false; return; }
         this.done = 'Added. Opening…';
-        setTimeout(() => { window.location = '/select-case/' + d.case; }, 900);
+        setTimeout(() => { window.kipiNav.go('/select-case/' + d.case); }, 900);
       } catch (e) {
         this.error = 'Save failed.'; this.busy = false;
       }

@@ -15,6 +15,7 @@ EXA_CONTENTS_URL = "https://api.exa.ai/contents"
 
 class ExaAdapter(Adapter):
     slug = "exa"
+    watched_types = ("domain", "subdomain", "url", "ip", "email", "phone", "handle", "person", "org", "telegram_channel", "crypto_wallet", "wallet", "asn", "indicator", "username", "fingerprint", "hash_sha256", "hash_md5")  # type-agnostic research tier: full investigable set (deliberate)
     display_name = "Exa AI semantic search"
     env_var = "EXA_API_KEY"
     category = "search"

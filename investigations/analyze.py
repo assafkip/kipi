@@ -17,7 +17,6 @@ Writes:
 import json
 import os
 import re
-from collections import defaultdict
 from pathlib import Path
 
 # analyze emits clusters + typed_relationships in ONE call. The live run proved 8,192
@@ -28,7 +27,6 @@ from pathlib import Path
 ANALYZE_MAX_TOKENS = int(os.environ.get("ANALYZE_MAX_TOKENS", "16384"))
 ANALYZE_MAX_RELATIONSHIPS = int(os.environ.get("ANALYZE_MAX_RELATIONSHIPS", "150"))
 
-from investigations.storage import db
 from investigations.llm import client as llm
 from investigations import understand
 from investigations.enrich.rel_vocab import normalize_rel
@@ -285,7 +283,8 @@ def gate_attribution(rel_type: str, confidence: str | None) -> str | None:
     return rel_type
 
 
-def apply_to_db(conn, llm_output: dict, allow_free_rel_types: bool = False) -> dict:
+def apply_to_db(conn, llm_output: dict, allow_free_rel_types: bool = False,
+                case: str | None = None) -> dict:
     typed = llm_output.get("typed_relationships", [])
     clusters = llm_output.get("clusters", [])
 
@@ -357,10 +356,11 @@ def apply_to_db(conn, llm_output: dict, allow_free_rel_types: bool = False) -> d
         if rtype is None:
             continue
         try:
-            db.upsert_typed_relationship(
-                conn, sid, did, rtype,
+            from investigations import store
+            store.apply_mutation(conn, store.edge_upserted(
+                case, sid, did, rtype, actor="pipeline:analyze",
                 confidence=t.get("confidence", "medium"),
-                evidence=t.get("evidence", "")[:300])
+                evidence=t.get("evidence", "")[:300]))
             typed_count += 1
         except Exception:
             continue
@@ -429,7 +429,7 @@ def _merged_role_weights(conn) -> dict:
     return weights
 
 
-def compute_threat_scores(conn) -> int:
+def compute_threat_scores(conn, commit: bool = True) -> int:
     """Compute threat_score per entity:
        base  = role_weight * 10 + report_count * 5 + degree * 1
        prior = seed_weight * 30 if entity is a seed
@@ -454,14 +454,21 @@ def compute_threat_scores(conn) -> int:
         ).fetchall():
             seed_weights[row["entity_id"]] = float(row["w"] or 1.0)
 
-    # Adjacency from typed_relationships (undirected for propagation purposes)
+    # Adjacency from typed_relationships (undirected for propagation purposes).
+    # degree_map counts edge ROWS per endpoint (same number the old per-entity
+    # COUNT(*) query produced) so the formula is unchanged; building it here also
+    # lets the skip-gate see connectivity, so a connected entity is never dropped.
     adj: dict[int, set[int]] = {}
+    degree_map: dict[int, int] = {}
     for rel in conn.execute(
         "SELECT src_entity_id AS s, dst_entity_id AS d FROM typed_relationships "
         "WHERE COALESCE(status,'active') = 'active'"
     ).fetchall():
         adj.setdefault(rel["s"], set()).add(rel["d"])
         adj.setdefault(rel["d"], set()).add(rel["s"])
+        degree_map[rel["s"]] = degree_map.get(rel["s"], 0) + 1
+        if rel["d"] != rel["s"]:
+            degree_map[rel["d"]] = degree_map.get(rel["d"], 0) + 1
 
     # Compute propagated boost per entity (depth-2 BFS from each seed)
     propagated: dict[int, float] = {}
@@ -490,18 +497,16 @@ def compute_threat_scores(conn) -> int:
         role = notes.split(" — ")[0].replace("role:", "").strip()
         role_w = role_weights.get(role, 0)
         eid = r["id"]
-        # Always include seeds + propagated even if role_w is 0/missing
+        # Always include seeds + propagated even if role_w is 0/missing.
+        # Degree keeps CONNECTED entities in: agent-promoted nodes carry no
+        # role: notes, and a case with no seeds would otherwise score nothing
+        # (the gate2 dormancy bug — every typed-edge entity skipped).
         seed_w = seed_weights.get(eid, 0)
         prop = propagated.get(eid, 0)
-        if role_w == 0 and seed_w == 0 and prop == 0:
+        degree = degree_map.get(eid, 0)
+        if role_w == 0 and seed_w == 0 and prop == 0 and degree == 0:
             continue
         report_count = r["report_count"] or 0
-        degree = conn.execute(
-            "SELECT COUNT(*) AS n FROM typed_relationships "
-            "WHERE (src_entity_id = ? OR dst_entity_id = ?) "
-            "AND COALESCE(status,'active') = 'active'",
-            (eid, eid),
-        ).fetchone()["n"]
         base = role_w * 10 + report_count * 5 + degree * 1
         prior = seed_w * 30
         score = base + prior + prop
@@ -511,7 +516,10 @@ def compute_threat_scores(conn) -> int:
             (eid, float(score), degree, report_count),
         )
         count += 1
-    conn.commit()
+    if commit:
+        # commit=False: the projection layer runs scoring inside the caller's
+        # transaction (project()'s caller-owns-commit contract, sp3).
+        conn.commit()
     return count
 
 
@@ -609,7 +617,8 @@ def run(conn, vault_dir: Path, schema: dict | None = None,
         case: str | None = None) -> dict:
     llm_output = extract_typed_relationships(conn, vault_dir, schema, case=case)
     print("Applying typed relationships + clusters to DB…")
-    applied = apply_to_db(conn, llm_output, allow_free_rel_types=bool(schema))
+    applied = apply_to_db(conn, llm_output, allow_free_rel_types=bool(schema),
+                          case=case)
     print(f"  typed relationships added: {applied['typed_relationships_added']}")
     print(f"  clusters added: {applied['clusters_added']}")
 

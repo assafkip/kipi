@@ -9,7 +9,7 @@
   .trail-dot { position:absolute; left:2px; top:3px; width:13px; height:13px; border-radius:50%; background:#FFFFFF; border:2px solid #0F766E; }
 </style>
 <div class="max-w-5xl mx-auto" x-data="runsView()"
-     x-init="loadTools(); if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (this.invDone) return; if (!document.querySelector(':focus')) location.reload(); })">
+     x-init="loadTools(); if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (this.invDone) return; if (!document.querySelector(':focus')) window.kipiNav.refresh(); })">
 
   <div class="flex items-start justify-between gap-3 mb-4">
     <div class="min-w-0">
@@ -71,7 +71,7 @@
     <div class="flex items-center justify-between mb-1.5">
       <span class="text-sm font-semibold text-ink"
             x-text="invResult.stopped ? 'Stopped — kept what it found' : 'Investigation complete'"></span>
-      <button @click="location.reload()" class="text-xs text-accent hover:underline">View full trail ↓</button>
+      <button @click="window.kipiNav.refresh()" class="text-xs text-accent hover:underline">View full trail ↓</button>
     </div>
     <div class="text-xs text-ink-muted mb-2 num">
       <span x-text="(invResult.findings || 0) + ' finding' + ((invResult.findings === 1) ? '' : 's')"></span>
@@ -125,6 +125,15 @@
               :class="view === 'findings' ? 'bg-bg-card text-ink shadow-sm' : 'text-ink-muted hover:text-ink'"
               class="px-3 py-1.5 rounded-md transition-colors">Findings</button>
     </div>
+    <!-- Pre-run cost estimate: lead with the expected (point) spend, show the cap as the
+         ceiling. So the analyst sees the bill BEFORE committing (kills the black-box sin).
+         Never blocks a run — informational only. -->
+    <template x-if="estimate && estimate.est_typical_usd != null">
+      <span class="text-xs text-ink-muted shrink-0 ml-auto mr-1" x-cloak
+            :title="estimate.basis === 'historical' ? 'expected ≈ avg of your past agent runs × planned targets' : 'first-run estimate (no history yet)'">
+        ~$<span x-text="Number(estimate.est_typical_usd).toFixed(2)"></span> expected<span x-show="estimate.basis !== 'historical'"> (est.)</span><template x-if="estimate.cost_cap_usd"><span> · cap $<span x-text="Number(estimate.cost_cap_usd).toFixed(0)"></span></span></template>
+      </span>
+    </template>
     <!-- Run another whole-case pass. The planner re-reads the case: it SKIPS targets
          already investigated and prioritizes the new entities your last run surfaced,
          so a second pass digs the fresh OSINT instead of redoing old work. -->
@@ -377,6 +386,7 @@ function runsView() {
   return {
     view: '{{ default_view|default("trail") }}',  // 'trail' | 'findings' (?view=findings)
     tools: null,  // pre-run tool readiness (live vs needs-a-key)
+    estimate: null,  // pre-run cost estimate (point estimate + cap), shown before a run
     busyInv: false, busyBrief: false, actionMsg: '',
     invLog: [], invEntity: '', invTimer: null, invProgress: null,
     stopping: false, invDone: false, invResult: null,  // Stop button + post-run recap
@@ -400,7 +410,13 @@ function runsView() {
       if (p.targets_total) return p.targets_done + ' / ' + p.targets_total + ' targets';
       return 'investigating…';
     },
+    async loadEstimate() {
+      // A whole-case pass from this surface is a deep run → estimate the deep cost.
+      try { this.estimate = await fetch('/api/investigate/estimate?deep=1').then(r => r.json()); }
+      catch (e) {}
+    },
     async loadTools() {
+      this.loadEstimate();
       try { this.tools = await fetch('/api/investigate/preflight').then(r => r.json()); }
       catch (e) {}
       // Resume the live stream if a run is already going.
@@ -473,11 +489,19 @@ function runsView() {
       }, 1500);
     },
     async regenBrief() {
-      this.busyBrief = true; this.actionMsg = '';
+      // Server job now (survives window-switch + reload); poll to completion.
+      this.busyBrief = true; this.actionMsg = 'Generating on the server (safe to switch windows)…';
       try {
         const d = await fetch('/api/synthesize', { method: 'POST' }).then(r => r.json());
         if (d.error) { this.actionMsg = d.error; this.busyBrief = false; return; }
-        this.actionMsg = 'Brief regenerated.'; this.busyBrief = false;
+        const tick = async () => {
+          let s; try { s = await fetch('/api/synthesize/status').then(r => r.json()); }
+          catch (e) { setTimeout(tick, 2500); return; }
+          if (s.status === 'done') { this.actionMsg = s.tradecraft_warning || 'Brief regenerated.'; this.busyBrief = false; }
+          else if (s.status === 'error') { this.actionMsg = s.error || 'Brief regeneration failed'; this.busyBrief = false; }
+          else setTimeout(tick, 1800);
+        };
+        tick();
       } catch (e) { this.actionMsg = 'Brief regeneration failed'; this.busyBrief = false; }
     },
   };

@@ -66,11 +66,11 @@ function correctionsView() {
     },
     async resolve(id) {
       await fetch('/api/claims/' + id + '/resolve', { method: 'POST' });
-      location.reload();  // refresh list + nav badge + reprojected graph
+      window.kipiNav.refresh();  // refresh list + nav badge + reprojected graph
     },
     async reject(id) {
       await fetch('/api/claims/' + id + '/reject', { method: 'POST' });
-      location.reload();
+      window.kipiNav.refresh();
     },
   }
 }

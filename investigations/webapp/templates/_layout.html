@@ -42,6 +42,39 @@
         }
       }
     </script>
+    <script>
+      // In-app navigation layer (prd-frontend-wiring-ratchet). ONE seam for all
+      // same-origin navigation so the app stops borrowing browser chrome (tabs,
+      // Back, full-page reload) — the native pywebview window has none. Every
+      // template routes through window.kipiNav.* instead of raw location.* /
+      // window.open; the ratchet (investigations/tests/test_frontend_wiring.py)
+      // enforces it. Defined in <head> so it exists before any inline script.
+      // The lines touching browser primitives are this layer's documented home
+      // (wiring-allow) — the single place to evolve toward SPA refresh / tabs.
+      window.kipiNav = {
+        go(path) { window.location.assign(path); },              // wiring-allow: the one nav primitive (pushes history → back() returns)
+        back() { if (window.history.length > 1) window.history.back(); else this.go('/'); },
+        refresh() { window.location.reload(); },                 // wiring-allow: in-app data refresh (pywebview-safe; updates chrome too)
+        openGraph(params) {
+          const p = params == null ? '' : String(params).replace(/^\?/, '');
+          this.go('/graph' + (p ? '?' + p : ''));                // in-app, returnable via back() — NOT a browser tab
+        },
+        async entity(name) {
+          const n = (name || '').trim();
+          if (!n) return this.go('/entities');
+          try {
+            const data = await fetch('/api/entities').then(r => r.json());
+            const items = Array.isArray(data) ? data : (data.entities || data.items || data.results || []);
+            const hit = items.find(e => ((e.canonical_name || e.name || e.label || '') + '').toLowerCase() === n.toLowerCase());
+            if (hit && hit.id != null) return this.go('/entity/' + hit.id);
+          } catch (e) { /* fall through to the entities list */ }
+          return this.go('/entities');
+        },
+      };
+      window.addEventListener('keydown', function (e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === '[') { e.preventDefault(); window.kipiNav.back(); }
+      });
+    </script>
     <style>
       [x-cloak] { display: none !important; }
       body { background: #FAFAF9; color: #1A1A19; }
@@ -136,38 +169,8 @@
        @keydown.window.ctrl.k.prevent="searchOpen = true; setTimeout(() => document.getElementById('global-search').focus(), 50)"
        @keydown.escape="searchOpen = false; sidebarOpen = false">
 
-    <!-- First-run welcome: the map for someone who has never seen a tool like this
-         (the "Maya" junior-analyst persona). Shows once (localStorage), reopenable from
-         the top strip's "How it works". Frames the 4 steps + one clear place to start,
-         so the 13-link sidebar isn't a wall on day one. -->
-    <div x-data="{ open: false }"
-         x-init="open = !localStorage.getItem('kipi_welcome_seen')"
-         @open-welcome.window="open = true">
-      <div x-show="open" x-cloak @click="open=false; localStorage.setItem('kipi_welcome_seen','1')"
-           class="fixed inset-0 z-[60] bg-ink/40 flex items-center justify-center p-4">
-        <div @click.stop class="max-w-lg w-full bg-bg-card border border-bg-border rounded-xl shadow-card p-6">
-          <h2 class="text-lg font-semibold text-ink">New here? Here's how it works.</h2>
-          <p class="text-sm text-ink-muted mt-1.5 leading-relaxed">
-            An investigation runs in 4 steps. You don't need every button in the sidebar —
-            just follow the highlighted <span class="text-accent font-medium">Next step</span> and it walks you through.
-          </p>
-          <ol class="mt-4 space-y-2 text-sm">
-            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">1</span><span><span class="font-medium text-ink">Intake</span> <span class="text-ink-muted">— drop your evidence: PDFs, screenshots, a scrape, or paste notes.</span></span></li>
-            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">2</span><span><span class="font-medium text-ink">Investigate</span> <span class="text-ink-muted">— the agent digs the open web and builds the graph (it models the case for you — nothing to set up).</span></span></li>
-            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">3</span><span><span class="font-medium text-ink">Deliver</span> <span class="text-ink-muted">— get the written brief.</span></span></li>
-            <li class="flex gap-2.5"><span class="shrink-0 w-5 h-5 rounded-full bg-accent/15 text-accent text-xs font-semibold flex items-center justify-center">4</span><span><span class="font-medium text-ink">Portfolio</span> <span class="text-ink-muted">— see how this case links to your others.</span></span></li>
-          </ol>
-          <div class="mt-5 flex flex-wrap items-center gap-2">
-            <a href="/simple" @click="localStorage.setItem('kipi_welcome_seen','1')"
-               class="text-sm px-4 py-2 bg-accent text-white rounded-lg hover:bg-accent-hover">⚡ Try Quick look — one name, watch it build</a>
-            <a href="/cases" @click="localStorage.setItem('kipi_welcome_seen','1')"
-               class="text-sm px-3 py-2 border border-bg-border rounded-lg hover:bg-bg-soft">Start with a case →</a>
-            <button @click="open=false; localStorage.setItem('kipi_welcome_seen','1')"
-                    class="text-sm px-3 py-2 text-ink-muted hover:text-ink ml-auto">Got it</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    {# First-run "New here?" welcome modal removed — this is a tool you use daily, not a
+       wizard. The chat is the way in; no onboarding tour. #}
 
     <div class="flex min-h-screen">
       <!-- Mobile backdrop -->
@@ -181,44 +184,17 @@
           <span class="text-xs px-1.5 py-0.5 bg-accent text-white rounded tracking-wide font-display font-semibold">kipi</span>
           <span class="text-sm font-display font-semibold text-ink">investigations</span>
         </a>
-        <nav class="flex-1 overflow-y-auto px-2 pb-6" @click="sidebarOpen = false">
-          {# Sidebar follows the investigation lifecycle, in order: where to look
-             first (Focus), then Intake → Investigate → Findings →
-             Deliver → Portfolio. Stage headers light up ✓ as each completes. #}
-          {{ grouphdr('Triage') }}
-          {{ sidelink('/', 'Focus', active=(path in ['/', '/focus'])) }}
-
-          {{ stagehdr(1, 'Intake', 'intake', done_keys) }}
-          {{ sidelink('/reports', 'Reports', active=path.startswith('/reports')) }}
-          {{ sidelink('/sources', 'Sources', active=path.startswith('/sources')) }}
-
-          {# Schema/Understand stage removed: the tool auto-models the case schema
-             during Process — no analyst step, not shown. /schema stays URL-only. #}
-          {{ stagehdr(2, 'Investigate', 'investigate', done_keys) }}
-          {# Collapsed by default to ONE item so the sidebar isn't a wall of 13. The
-             four sub-tabs (Graph / Runs / Enrich / Chat / Entities) reveal, indented,
-             only when you're actually in the Investigate section. #}
-          {% set in_investigate = path.startswith('/entities') or path.startswith('/entity')
-             or path.startswith('/graph') or path.startswith('/runs') or path.startswith('/findings')
-             or path.startswith('/enrich') %}
-          {{ sidelink('/runs', 'Investigate', active=in_investigate) }}
-          {% if in_investigate %}
-          <div class="ml-3 pl-2 border-l border-bg-border">
-            {{ sidelink('/graph', 'Graph', active=path.startswith('/graph')) }}
-            {{ sidelink('/runs', 'Runs & findings', active=(path.startswith('/runs') or path.startswith('/findings'))) }}
-            {{ sidelink('/enrich', 'Enrich', active=path.startswith('/enrich')) }}
-            {# Chat moved to the always-on bubble (bottom-right, every page) — no side link. #}
-            {{ sidelink('/entities', 'Entities', active=(path.startswith('/entities') or path.startswith('/entity'))) }}
-          </div>
-          {% endif %}
-
-          {{ grouphdr('Signals', badge=sig_count) }}
-          {{ sidelink('/alerts', 'Inbox', active=(path.startswith('/alerts') or path.startswith('/corrections') or path.startswith('/activity')), badge=sig_count, badge_class='bg-sev-high') }}
-
-          {{ stagehdr(3, 'Deliver', 'deliver', done_keys) }}
+        <nav class="flex-1 overflow-y-auto px-2 pb-6 pt-2" @click="sidebarOpen = false">
+          {# Flat nav — no lifecycle staging/wizard. The chat+graph home does the
+             investigating; these are the few destinations chat doesn't fully cover
+             yet. As chat absorbs them (enrich/runs/deliver as commands) they retire. #}
+          {{ sidelink('/', 'Chat + graph', active=(path in ['/', '/graph'])) }}
+          {{ sidelink('/reports', 'Reports & intake', active=(path.startswith('/reports') or path.startswith('/sources'))) }}
+          {{ sidelink('/runs', 'Runs & findings', active=(path.startswith('/runs') or path.startswith('/findings'))) }}
+          {{ sidelink('/enrich', 'Enrich', active=path.startswith('/enrich')) }}
+          {{ sidelink('/entities', 'Entities', active=(path.startswith('/entities') or path.startswith('/entity'))) }}
           {{ sidelink('/synthesis', 'Deliverables', active=(path.startswith('/synthesis') or path.startswith('/briefs') or path.startswith('/exports') or path == '/report' or path.startswith('/report/'))) }}
-
-          {{ stagehdr(4, 'Portfolio', 'portfolio', done_keys) }}
+          {{ sidelink('/alerts', 'Inbox', active=(path.startswith('/alerts') or path.startswith('/corrections') or path.startswith('/activity')), badge=sig_count, badge_class='bg-sev-high') }}
           {{ sidelink('/cross-case', 'Cross-case', active=(path.startswith('/cross-case') or path.startswith('/bridges'))) }}
           {{ sidelink('/cross-domain', 'Cross-domain', active=path.startswith('/cross-domain')) }}
         </nav>
@@ -232,10 +208,14 @@
             <button @click="sidebarOpen = !sidebarOpen" class="md:hidden p-1.5 -ml-1 rounded hover:bg-bg-soft text-ink-muted" title="Menu">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
             </button>
+            <!-- In-app Back + breadcrumb (the native window has no browser chrome). -->
+            <button onclick="window.kipiNav.back()" title="Back (⌘[)"
+                    class="flex items-center gap-1 p-1.5 -ml-1 rounded hover:bg-bg-soft text-ink-muted">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+              <span class="hidden sm:inline text-sm">Back</span>
+            </button>
+            <nav id="kipi-breadcrumb" aria-label="Breadcrumb" class="text-xs text-ink-faint truncate max-w-[40ch]"></nav>
             <div class="flex-1"></div>
-            <button @click="$dispatch('open-welcome')"
-                    class="text-xs px-2 py-1 rounded text-ink-muted hover:text-accent hover:bg-bg-soft"
-                    title="How this works">? How it works</button>
             {% if nav %}
             <!-- Case switcher: multi-select. Check one or more cases; every view
                  then represents the chosen set. -->
@@ -291,9 +271,8 @@
         </div>
 
         <main class="px-4 py-5 w-full max-w-[1400px] mx-auto">
-          {# Lifecycle progress rail — shows only for a single active case. #}
-          <div class="max-w-5xl mx-auto">{% include "_lifecycle_rail.html" %}</div>
-          {% include "_next_step.html" %}
+          {# Lifecycle rail + next-step CTA removed: the chat is the next-step surface.
+             The tool is "a chat with a graph," not a staged wizard. #}
           {% block content %}{% endblock %}
         </main>
       </div>
@@ -350,13 +329,13 @@
             ? this.picked.filter(x => x !== s) : [...this.picked, s];
         },
         apply() {
-          window.location = '/select-case/' + (this.picked.length ? this.picked.join(',') : '__all__');
+          window.kipiNav.go('/select-case/' + (this.picked.length ? this.picked.join(',') : '__all__'));
         },
       };
     };
     window.__setAnalyst = function() {
       const name = prompt('Your analyst name (used to attribute notes + activity):');
-      if (name && name.trim()) window.location.href = '/set-analyst/' + encodeURIComponent(name.trim());
+      if (name && name.trim()) window.kipiNav.go('/set-analyst/' + encodeURIComponent(name.trim()));
     };
 
     // PRD-11: shared "data changed → refresh" subscriber. Any view registers a callback
@@ -388,6 +367,16 @@
       }
       setInterval(poll, 3000);
       poll();
+    })();
+
+    // Breadcrumb ("you are here") — wayfinding for the native window which has
+    // no URL bar. Derived from the current path; full-page nav re-renders it.
+    (function () {
+      const el = document.getElementById('kipi-breadcrumb');
+      if (!el) return;
+      const segs = window.location.pathname.split('/').filter(Boolean);
+      const label = s => s.replace(/[-_]/g, ' ');
+      el.textContent = ['Home', ...segs.map(label)].join('  ›  ');
     })();
   </script>
 

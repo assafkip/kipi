@@ -7,8 +7,7 @@ treat all providers uniformly.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import dataclass
 
 
 def resolve_key(slug: str, env_var: str | None) -> str:
@@ -56,12 +55,10 @@ def key_source(slug: str, env_var: str | None) -> str:
 
 class EnrichmentError(RuntimeError):
     """Raised by adapter run() when a provider call fails."""
-    pass
 
 
 class NotConfiguredError(EnrichmentError):
     """Raised when the adapter's required env var is unset."""
-    pass
 
 
 @dataclass
@@ -78,9 +75,6 @@ class EnrichmentResult:
     raw_json: dict | None = None
     confidence: str = "medium"   # 'high' | 'medium' | 'low'
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
 
 class Adapter:
     """Base adapter contract. Subclasses set class attrs + implement run()."""
@@ -90,6 +84,11 @@ class Adapter:
     env_var: str | None = None
     category: str = "search"
     cost_per_call_usd: float | None = None
+    # The entity types this adapter can act on (the Maltego input-entity
+    # filter). MUST be a non-empty subset of registry.TRANSFORM_TYPES — the
+    # registry validates at import, so an undeclared adapter is structurally
+    # uncallable (sp2-watched-types-registry).
+    watched_types: tuple = ()
 
     def is_configured(self) -> bool:
         """True iff a key is available — locally-stored DB key or env var."""

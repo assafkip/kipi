@@ -18,16 +18,19 @@ every node up front. Caps: max_turns + timeout + a tight allowedTools list.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re as _re
 import subprocess
 import threading as _threading
 from pathlib import Path
 
-from investigations import verify
+from investigations import identity_anchor, verify
 from investigations.enrich.rel_vocab import normalize_rel, vocab_prompt_list
 from investigations.llm.client import CLAUDE_BIN, ask
 from investigations.storage import db
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 # Cost lever (audit 2026-06-03): the agent CLI was UNPINNED → inherited the claude
@@ -47,6 +50,41 @@ def _safe_model(model: str | None) -> str:
     if "opus" in m.lower() and not ALLOW_OPUS:
         return "claude-sonnet-4-6"
     return m
+
+
+# Per-token price table — $ per 1 token (input, output), keyed by model family.
+# Sourced via the claude-api skill (cached 2026-05-26), NOT memory: published rates are
+# $/1M tokens → divide by 1e6. Used ONLY to ESTIMATE a STOPPED turn's spend (the SDK
+# ResultMessage carries the exact cost on a natural finish; a Stop/turn-limit cut means no
+# ResultMessage, so we estimate from accumulated token usage instead — never a null bill).
+# Keyed by substring so date-suffixed IDs (claude-haiku-4-5-20251001) still match.
+_MODEL_PRICES = {
+    "fable-5":     (10.00 / 1_000_000, 50.00 / 1_000_000),
+    "opus":        (5.00 / 1_000_000, 25.00 / 1_000_000),
+    "sonnet-4-6":  (3.00 / 1_000_000, 15.00 / 1_000_000),
+    "haiku-4-5":   (1.00 / 1_000_000, 5.00 / 1_000_000),
+}
+# Default rate when the model string matches nothing (the AGENT_MODEL default is Sonnet).
+_DEFAULT_PRICE = _MODEL_PRICES["sonnet-4-6"]
+
+
+def _price_for(model: str | None) -> tuple[float, float]:
+    """(input_rate, output_rate) $/token for a model string, by substring match."""
+    m = (model or AGENT_MODEL).lower()
+    for key, rate in _MODEL_PRICES.items():
+        if key in m:
+            return rate
+    return _DEFAULT_PRICE
+
+
+def estimate_cost_usd(input_tokens: int, output_tokens: int,
+                      model: str | None = None) -> float:
+    """Estimate a turn's $ spend from token usage when the exact SDK cost is unavailable
+    (a STOPPED / turn-limit-cut turn emits no ResultMessage). Cache tokens count as input
+    at full rate here — a deliberate slight over-estimate so the shown number never
+    under-promises the bill."""
+    in_rate, out_rate = _price_for(model)
+    return round(input_tokens * in_rate + output_tokens * out_rate, 4)
 
 
 # GLOBAL agent cap (Codex/founder 2026-06-03): the crew fans each target to 4 sub-agents
@@ -90,12 +128,17 @@ def _build_mcp_config() -> Path:
 # reachable even when an MCP tool fails to register.
 _KIPI_MCP_TOOLS = [
     "mcp__kipi-osint__enumerate_infra",
-    "mcp__kipi-osint__crtsh_subdomains", "mcp__kipi-osint__whois_lookup",
+    "mcp__kipi-osint__crtsh_subdomains", "mcp__kipi-osint__typosquat",
+    "mcp__kipi-osint__whois_lookup",
     "mcp__kipi-osint__dns_lookup", "mcp__kipi-osint__reverse_dns",
     "mcp__kipi-osint__virustotal",
     "mcp__kipi-osint__reverse_whois", "mcp__kipi-osint__dns_history",
+    "mcp__kipi-osint__reverse_ns",
     "mcp__kipi-osint__shodan_host", "mcp__kipi-osint__censys_host",
     "mcp__kipi-osint__breach_intel",
+    # IP reputation, scan-search, threat pulses, breach (PRD osint-providers-batch).
+    "mcp__kipi-osint__abuseipdb", "mcp__kipi-osint__urlscan",
+    "mcp__kipi-osint__otx", "mcp__kipi-osint__hibp",
     "mcp__kipi-osint__abusech", "mcp__kipi-osint__web_search",
     "mcp__kipi-osint__tavily_search", "mcp__kipi-osint__exa_search",
     "mcp__kipi-osint__jina_read",
@@ -103,6 +146,24 @@ _KIPI_MCP_TOOLS = [
     # wallet->tx. All keyless (wallet ETH self-guards on a key).
     "mcp__kipi-osint__gravatar", "mcp__kipi-osint__ipgeo",
     "mcp__kipi-osint__username_sweep", "mcp__kipi-osint__wallet_tx",
+    # On-chain compliance + identity (PRD-1): sanctions oracle, ENS, wallet labels.
+    "mcp__kipi-osint__ofac_screen", "mcp__kipi-osint__ens_resolve",
+    "mcp__kipi-osint__wallet_labels",
+    # On-chain value flow + multi-chain (PRD-2): ERC-20 token flow, Tron, Solana.
+    "mcp__kipi-osint__wallet_tokens", "mcp__kipi-osint__tron_wallet",
+    "mcp__kipi-osint__solana_wallet",
+    # On-chain breadth + clustering (PRD-3): multi-chain, BTC cluster (T3 lead), TON.
+    "mcp__kipi-osint__blockchair_tx", "mcp__kipi-osint__wallet_cluster",
+    "mcp__kipi-osint__ton_tx",
+    # Crypto + dark-web reputation / leads (PRD-4): T3 lead generators.
+    "mcp__kipi-osint__crypto_abuse", "mcp__kipi-osint__darkweb_search",
+    # Non-crypto primitives (PRD-5): ASN/netblock owner, phone intel, EXIF metadata.
+    "mcp__kipi-osint__asn_lookup", "mcp__kipi-osint__phone_parse",
+    "mcp__kipi-osint__exif_extract",
+    # Existing-adapter hardening + keyed lookups (PRD-6): scanner, registry, git, holehe, deep-DNS.
+    "mcp__kipi-osint__greynoise", "mcp__kipi-osint__opencorporates",
+    "mcp__kipi-osint__git_emails", "mcp__kipi-osint__holehe",
+    "mcp__kipi-osint__dns_deep",
     # Composite tool (not a 1:1 adapter): content-platform scrape via the apify adapter.
     "mcp__kipi-osint__social_scrape",
 ]
@@ -158,10 +219,12 @@ def _live_allowed_tools() -> list[str]:
     if "apify" in dead:
         drop.update({"mcp__kipi-osint__social_scrape", "mcp__apify__search-actors",
                      "mcp__apify__call-actor", "mcp__apify__fetch-actor-details"})
-    # C7: the whoisxml adapter backs two MCP tools whose names don't contain 'whoisxml'
-    # (reverse_whois / dns_history) — the generic substring filter misses them.
+    # C7: the whoisxml adapter backs three MCP tools whose names don't contain
+    # 'whoisxml' (reverse_whois / dns_history / reverse_ns) — the generic substring
+    # filter misses them.
     if "whoisxml" in dead:
-        drop.update({"mcp__kipi-osint__reverse_whois", "mcp__kipi-osint__dns_history"})
+        drop.update({"mcp__kipi-osint__reverse_whois", "mcp__kipi-osint__dns_history",
+                     "mcp__kipi-osint__reverse_ns"})
     return [t for t in ALLOWED_TOOLS
             if t not in drop and not (t.startswith("mcp__") and any(d in t for d in dead))]
 
@@ -182,7 +245,7 @@ _WEB_RECALL_MCP = {"mcp__kipi-osint__web_search", "mcp__kipi-osint__tavily_searc
 # Infra adapter slugs the pass-0 belt is narrowed to (replaces the `osint-tool:*` wildcard
 # so `./invctl osint-tool perplexity` can't run during the infra-only pass — Codex).
 _INFRA_BELT_PATTERNS = [f"Bash(./invctl osint-tool {s}:*)" for s in
-                        ("crtsh", "whois", "dns", "reverse_dns", "virustotal",
+                        ("crtsh", "typosquat", "whois", "dns", "reverse_dns", "virustotal",
                          "abusech", "whoisxml", "infra", "breach")]
 # Pass-0 NON-infra tools to drop: web recall, the full belt wildcard, arbitrary page
 # fetch, paid scraping (apify), and reddit/web search.
@@ -239,13 +302,21 @@ sources before calling anything confirmed. A thin investigation that skipped
 available tools is a FAILURE, not a result.
 
 PLAYBOOK BY TARGET TYPE (run all that apply):
-- domain            -> crtsh (subdomains) + whois + dns (infra)
-                       + virustotal + abusech (reputation/IOC) + web_search/tavily/exa
+- domain            -> crtsh (subdomains) + typosquat (lookalike phishing domains; only
+                       LIVE/resolving candidates promote, unconfirmed stay header-only leads)
+                       + whois + dns (infra)
+                       + virustotal + abusech (reputation/IOC) + urlscan (scans urlscan
+                       already has: its related domains/IPs) + otx (threat pulses + passive
+                       DNS) + hibp (breaches recorded against the site) + web_search/tavily/exa
                        (who runs it) + jina (read its key page). If DNS is DEAD/empty,
                        pull `whoisxml --mode dns_history` for its HISTORICAL IPs — a dead
                        seed still has a past, and its old IP is the link to the cluster.
+                       dns_deep (SPF/DMARC posture + mail provider + AXFR attempt) hardens
+                       the infra pivot — a shared mail provider / open AXFR is a finding.
 - ip                -> reverse_dns + whois (infra) + ipgeo (geo + ASN: who owns the
-                       netblock) + virustotal + abusech + web_search.
+                       netblock) + abuseipdb (IP reputation / abuse reports) + urlscan
+                       (pages served here) + otx (pulses + passive DNS) + virustotal
+                       + abusech + web_search.
 - url / page        -> jina/WebFetch for a cheap first read + virustotal. But on a
                        SCAM / PAYMENT / JS-heavy page, the BROWSER is a PRIMARY move,
                        NOT a last resort: browser_navigate -> browser_wait_for, then
@@ -256,16 +327,37 @@ PLAYBOOK BY TARGET TYPE (run all that apply):
                        static fetch alone misses everything that matters — reach for
                        network_requests + evaluate early, don't wait for jina to fail.
 - handle / person / org -> web_search + tavily + exa (identity, footprint) + apify
-                       (social profiles/posts) + reddit (presence).
+                       (social profiles/posts) + reddit (presence) + opencorporates (officers
+                       / filings / jurisdiction — T1 registry for an org/person) + git_emails
+                       (commit-author emails from a public repo/handle — corroborates a
+                       scraped email; alone a hypothesis) + darkweb_search (Ahmia .onion
+                       leads — T3, hypothesis not finding; hacktivist/leak cases).
 - content platform (a tiktok / youtube / twitter-x / instagram URL or @handle)
                     -> social_scrape (pulls the profile + recent posts + transcript via
                        the right scraper). Content platforms are the RICHEST source on a
                        creator/operator — pull the actual content, don't just note the link.
 - wallet / hash     -> wallet (BTC keyless / ETH key: balance + tx COUNTERPARTIES — each
                        counterparty address is a promotable pivot, "drains_to") +
+                       wallet_tokens (ERC-20 token flow: USDT/USDC counterparties, symbol on
+                       the edge) + tron_wallet (Tron/TRC-20 — the USDT pig-butchering rail) +
+                       solana_wallet (Solana/SPL — rug/drainer surface) +
+                       blockchair_tx (LTC/BCH/DOGE + other UTXO chains) +
+                       ton_tx (TON EQ/UQ addresses) + wallet_cluster (which exchange owns a
+                       BTC address = subpoena target; T3 LEAD only, hypothesis not finding) +
+                       ofac_screen (OFAC sanctions oracle, T1 — a hit is a confirmed
+                       compliance finding) + ens_resolve (name<->address crosslink, T1) +
+                       wallet_labels (exchange/mixer/phish — T3 TAG only, NEVER a finding) +
+                       crypto_abuse (scam blocklist — T3 LEAD, hypothesis not finding) +
                        virustotal + abusech (known-bad) + web_search (attribution).
+- ip                -> asn_lookup (ASN / netblock owner — a shared ASN/org = shared or
+                       bulletproof hosting, the infra pivot) + greynoise (scanner-vs-targeted:
+                       benign-scanner / malicious-noise / unseen) + reverse_dns + reputation.
+- phone             -> phone_parse (region / carrier / line-type incl. VoIP, a fraud signal).
+- image / file      -> exif_extract (GPS coordinates + device make/model/serial from EXIF).
 - email             -> gravatar (profile + the owner's LINKED social accounts — pivots) +
-                       breach_intel (stealer/breach exposure) + web_search.
+                       breach_intel (stealer/breach exposure) + hibp (which account breaches
+                       it appears in) + holehe (which of ~120 sites it registered on — T3
+                       HYPOTHESIS leads, corroborate before findings) + web_search.
 - email (registrant) -> `whoisxml --mode reverse_whois` (EVERY other domain that email
                        registered = the operator's full portfolio) + web_search.
 - handle / username -> username (presence sweep: which platforms the handle exists on —
@@ -396,11 +488,15 @@ def _run_agent_warm(task: str, case: str | None, timeout: int | None = None,
 
     Runs on the PERSISTENT warm loop (run_turn_on_warm_loop), never asyncio.run —
     asyncio.run-per-turn would close the loop and orphan the warm client (cold).
-    timeout (KIPI_WARM_TURN_TIMEOUT, default 600s) + cancel give parity with the cold
-    watchdog/Stop. The warm turn streams a step trail and returns it (+capped) so
-    investigate_entity salvages partial findings on a cutoff like cold — no work lost."""
+    NO wall-clock deadline by default (founder: "no more deadlines" — a timer cut real
+    digs; the surviving twin of the removed --max-turns leash). The run is bounded by the
+    warm tool BUDGET (KIPI_WARM_TOOL_BUDGET, a PreToolUse circuit-breaker) + the max-turns
+    backstop instead. KIPI_WARM_TURN_TIMEOUT can re-impose a wall-clock if set. `cancel`
+    (Stop) still interrupts cooperatively. The warm turn streams a step trail and returns it
+    (+capped) so investigate_entity salvages partial findings on a cutoff — no work lost."""
     if timeout is None:
-        timeout = int(os.environ.get("KIPI_WARM_TURN_TIMEOUT", "600"))
+        _env_to = os.environ.get("KIPI_WARM_TURN_TIMEOUT", "").strip()
+        timeout = int(_env_to) if _env_to else None
     from investigations.agent.warm_session import run_turn_on_warm_loop
     try:
         warm = run_turn_on_warm_loop(case or "default", task,
@@ -417,15 +513,21 @@ def _run_agent_warm(task: str, case: str | None, timeout: int | None = None,
     if warm.get("capped") and not (warm.get("steps") or (warm.get("result_text") or "").strip()):
         return {"ok": False, "error": f"warm turn timeout after {timeout}s (no output)"}
     # Carry the step trail + capped flag so the shared salvage reconstructs findings
-    # on a cutoff — parity with the cold path (no work lost).
-    return {"ok": True, "result_text": warm.get("result_text") or "", "raw": {},
+    # on a cutoff — parity with the cold path (no work lost). `raw` now mirrors the cold
+    # ResultMessage shape (num_turns/total_cost_usd) so _build_process records real cost +
+    # turns instead of NULLs — the warm path is no longer cost-blind.
+    raw = {"num_turns": warm.get("turns"), "total_cost_usd": warm.get("cost_usd")}
+    return {"ok": True, "result_text": warm.get("result_text") or "", "raw": raw,
             "events": [], "steps": warm.get("steps") or [],
             "capped": bool(warm.get("capped")), "cancelled": False,
-            "stderr_tail": "", "returncode": 0}
+            "stderr_tail": "", "returncode": 0,
+            "started_at": warm.get("started_at"), "finished_at": warm.get("finished_at"),
+            "elapsed_s": warm.get("elapsed_s")}
 
 
-_SCOPE_MATCHER = ("Bash|whois_lookup|dns_lookup|reverse_dns|virustotal|crtsh|abusech|"
+_SCOPE_MATCHER = ("Bash|whois_lookup|dns_lookup|reverse_dns|virustotal|crtsh|typosquat|abusech|"
                   "shodan|censys|breach|browser_navigate|reverse_whois|dns_history|"
+                  "reverse_ns|"
                   "jina_read|social_scrape|web_search|exa_search|tavily_search|perplexity_ask")
 
 
@@ -464,6 +566,25 @@ def _build_scope_settings(roster: list) -> tuple[str, str]:
     """Back-compat shim (scope hook only). _build_guard_settings is the full builder."""
     settings_path, roster_path, _ = _build_guard_settings(roster, tool_budget=None)
     return settings_path, roster_path
+
+
+def _build_budget_settings(tool_budget: int) -> tuple[str, str]:
+    """Write a settings file wiring ONLY the RULE-114 budget hook (no scope cage), plus the
+    budget file it reads. Return (settings_path, budget_path). This is what lets a DEEP /
+    unbounded warm run still carry a tool-call circuit-breaker — the warm agent loads no repo
+    hooks (setting_sources=[]), so the breaker must be injected through `settings=`."""
+    import tempfile as _tf
+    from investigations.agent import budget as _budget
+    bfd, budget_path = _tf.mkstemp(prefix="kipi_tool_budget_", suffix=".json")
+    os.close(bfd)
+    _budget.write_budget(budget_path, tool_budget)
+    budget_py = os.path.join(str(ROOT), "investigations", "agent", "budget_hook.py")
+    settings = {"hooks": {"PreToolUse": [
+        {"matcher": ".*", "hooks": [{"type": "command", "command": f"python3 {budget_py}"}]}]}}
+    sfd, settings_path = _tf.mkstemp(prefix="kipi_budget_settings_", suffix=".json")
+    with os.fdopen(sfd, "w") as f:
+        json.dump(settings, f)
+    return settings_path, budget_path
 
 
 def _run_agent(task: str, max_turns: int = 28, timeout: int = 600,
@@ -899,6 +1020,10 @@ _INFRA_TOOL_TOKENS = ("crtsh", "dns", "whois", "virustotal", "abusech", "infra",
                       "rdap", "browser_")
 _INFRA_BELT_SLUGS = ("crtsh", "whois", "dns", "virustotal", "abusech", "whoisxml", "infra")
 _INFRA_ENTITY_TYPES = {"domain", "subdomain", "ip", "ip_address", "url", "netblock", "asn"}
+# Person/handle types whose identity attribution is fakeable from name/photo/web alone.
+# The tradecraft floor (q-investigation.md) requires a NON-FAKEABLE crosslink to graph one.
+# One source of truth, shared with identity_anchor (the reference builder + classifier).
+_PERSON_ENTITY_TYPES = identity_anchor.PERSON_ENTITY_TYPES
 
 
 def _bash_slug(step: dict) -> str | None:
@@ -982,15 +1107,37 @@ def _grade_finding(f: dict) -> tuple[str, str]:
     return grade, asset_conf
 
 
-def _promotion_gate(f: dict) -> tuple[bool, str]:
+def _promotion_gate(f: dict, reference: "identity_anchor.Reference | None" = None) -> tuple[bool, str]:
     """Whether a finding may auto-build the graph, and if not, why — on the 4_points
     A–D reliability model. The agent's self-declared flags are NOT trusted alone:
     the grade is computed from independent tool corroboration (_attribute_findings).
     Grade A/B promote; C/D LAND but stay gated as LEADS in /enrich for the analyst.
     For a domain/IP, cluster membership additionally requires an INFRA confirmation —
-    a web co-mention is never enough (keeps the graph reproducible run-to-run)."""
+    a web co-mention is never enough (keeps the graph reproducible run-to-run).
+
+    `reference` (the case's confirmed-actor identity, PRD prd-identity-anchor) is annotation
+    only: it sets f['identity_anchor']='match' on a finding that matches a confirmed actor and
+    NEVER changes the promote/deny decision. Default None keeps every legacy caller unchanged."""
+    # Scrub any agent-supplied identity annotation up front (Codex adv-4: the finding JSON could
+    # carry a forged identity_anchor='match'); it is re-set below only on a deterministic match.
+    # Runs even when reference is None, so a forged key never survives into raw_json on any path.
+    f.pop("identity_anchor", None)
     grade, asset_conf = _grade_finding(f)
     f["grade"], f["asset_confidence"] = grade, asset_conf
+    etype = (f.get("entity_type") or "").lower()
+    val = f.get("entity") or ""
+    # Annotate (only) a finding that matches a confirmed actor. Placed before the gates so a
+    # held-as-lead match is annotated too; the annotation never affects the decision below.
+    if reference is not None and identity_anchor.classify(reference, etype, val) == "match":
+        f["identity_anchor"] = "match"
+    # Entity-admission contract (RCA rca-recurring-graph-noise-2026-06-11): the ONE gate
+    # every creation path shares, so junk can't re-enter through this (agent) door after
+    # being blocked at another. Keeps boilerplate / reference / mistyped-junk nodes OFF the
+    # graph regardless of grade; they still LAND as leads in /enrich.
+    from investigations import admission
+    ok, why = admission.is_admissible(etype, val)
+    if not ok:
+        return False, f"not graphed ({why}); lead"
     if f.get("unvalidated"):
         return False, "agent marked unvalidated (grade D)"
     if f.get("claim_unverified"):
@@ -1001,11 +1148,23 @@ def _promotion_gate(f: dict) -> tuple[bool, str]:
     if grade == "C":
         return False, "grade C — single web/inferred source; lead, corroborate before graphing"
     # Grade A/B: a domain/IP joins the cluster only on shared INFRA (crt.sh / DNS /
-    # WHOIS / reverse-WHOIS / passive-DNS), not a web co-mention.
-    etype = (f.get("entity_type") or "").lower()
+    # WHOIS / reverse-WHOIS / passive-DNS), not a web co-mention. (etype computed above.)
     if etype in _INFRA_ENTITY_TYPES and (f.get("infra_source_count") or 0) < 1:
         return False, ("web-recall only — no infra tool confirmed this domain/IP; "
                        "lead, verify (crt.sh / DNS / WHOIS / passive-DNS) before graphing")
+    # Person/handle identity floor (tradecraft: photo/name-only attribution prohibition,
+    # q-investigation.md). A person or handle joins the graph ONLY on a NON-FAKEABLE crosslink
+    # (registry / infra / on-chain — i.e. infra_source_count>=1). Name + photo + a web
+    # co-mention are all fakeable, so a person/handle with no such crosslink caps at grade C
+    # and stays a lead. Mirrors the name+photo inversion fixed in the osint skill (70d23b59),
+    # now enforced in the agent's own gate so a warm-chat / run finding can't slip a
+    # name-only person into the graph.
+    if etype in _PERSON_ENTITY_TYPES and (f.get("infra_source_count") or 0) < 1:
+        if grade in ("A", "B"):
+            f["grade"] = "C"
+        return False, ("person/handle attributed with no non-fakeable crosslink "
+                       "(name/photo/web only) — unverified identity; lead, corroborate with "
+                       "a registry / infra / on-chain link before graphing")
     return True, ""
 
 
@@ -1073,9 +1232,14 @@ def land_warm_chat(conn, case: str | None, message: str, run: dict) -> dict:
     if has_intel:
         try:
             _attribute_findings(parsed, steps)
-            process = _build_process(parsed, text, run.get("raw"), run.get("capped"), steps)
+            # The chat path's `run` is the raw _collect output (no `raw` dict) — build one
+            # from its cost/turns so _build_process records them instead of NULLs.
+            raw = run.get("raw") or {"num_turns": run.get("turns"),
+                                     "total_cost_usd": run.get("cost_usd")}
+            process = _build_process(parsed, text, raw, run.get("capped"), steps)
             landed = land_findings(conn, case, f"CHAT: {message[:60]}", message, parsed,
-                                   process=process) or {}
+                                   process=process, started_at=run.get("started_at"),
+                                   cost_usd=run.get("cost_usd")) or {}
         except Exception as exc:  # landing must never break the chat reply
             landed = {"error": str(exc)[:200]}
     reply = _strip_findings_json(text).strip() or text.strip()
@@ -1258,7 +1422,8 @@ def _looks_like_entity(name: str) -> bool:
     return True
 
 
-def _resolve_entity_id(conn, name, rep_id: int, create_infra: bool = True) -> int | None:
+def _resolve_entity_id(conn, name, rep_id: int, create_infra: bool = True,
+                       case: str | None = None) -> int | None:
     """Find an entity by name; create it only if the agent named a plausible NEW
     indicator (not a prose fragment). A non-string endpoint (LLM emitted a list /
     number) is malformed → return None, never stringify it into a junk node.
@@ -1282,7 +1447,15 @@ def _resolve_entity_id(conn, name, rep_id: int, create_infra: bool = True) -> in
     etype = _classify(name) or "other"
     if not create_infra and etype in _INFRA_ENTITY_TYPES:
         return None  # C3: relationships cannot create ungated infra (domain/IP) nodes
-    eid = db.upsert_entity(conn, name, etype, rep_id, provenance="agent")
+    # The store gates agent-actor creations through is_admissible (RCA
+    # rca-recurring-graph-noise): a junk endpoint (bare tracking id, reference
+    # domain) is rejected, which drops the edge too (caller skips on None).
+    from investigations import store
+    result = store.apply_mutation(conn, store.entity_upserted(
+        case, name, etype, rep_id, actor="agent", provenance="agent"))
+    if not result["applied"]:
+        return None
+    eid = result["entity_id"]
     db.add_mention(conn, eid, rep_id, name, "via agent relationship")
     return eid
 
@@ -1292,7 +1465,7 @@ def _resolve_entity_id(conn, name, rep_id: int, create_infra: bool = True) -> in
 # (normalize_rel). All three landing paths call it; nothing here maps labels anymore.
 
 
-def _land_relationships(conn, parsed: dict, rep_id: int) -> int:
+def _land_relationships(conn, parsed: dict, rep_id: int, case: str | None = None) -> int:
     """Persist the agent's discovered relationships as TYPED, DIRECTED graph edges
     with the REAL rel_type + the agent's confidence + provenance — instead of the
     old generic 'enriched' link. This is the story the agent built, made queryable.
@@ -1312,17 +1485,19 @@ def _land_relationships(conn, parsed: dict, rep_id: int) -> int:
                 continue
             # C3: relationships connect EXISTING infra nodes; they can't create new
             # ungated domains/IPs (those come through the graded findings path).
-            src = _resolve_entity_id(conn, r.get("src"), rep_id, create_infra=False)
-            dst = _resolve_entity_id(conn, r.get("dst"), rep_id, create_infra=False)
+            src = _resolve_entity_id(conn, r.get("src"), rep_id, create_infra=False, case=case)
+            dst = _resolve_entity_id(conn, r.get("dst"), rep_id, create_infra=False, case=case)
             ev = str(r.get("provenance") or "")[:200]
             # Controlled vocabulary is the binding gate: normalize_rel returns a REL_VOCAB
             # member or None (skip). No free-form label reaches the DB. (issue rel-vocab-validator)
             rel = normalize_rel(r.get("rel_type"), ev)
             if not src or not dst or src == dst or not rel:
                 continue
+            from investigations import store
             db.add_relationship(conn, src, dst, rel, rep_id, ev, _REL_CONF.get(conf, 0.6))
-            db.upsert_typed_relationship(conn, src, dst, rel, confidence=conf,
-                                         evidence=ev, provenance=ev or "agent")
+            store.apply_mutation(conn, store.edge_upserted(
+                case, src, dst, rel, actor="agent", confidence=conf,
+                evidence=ev, provenance=ev or "agent"))
             # Carry dst into src's cluster(s) so in-cluster graph views show them together.
             for row in conn.execute(
                 "SELECT cluster_id FROM cluster_members WHERE entity_id = ?", (src,)).fetchall():
@@ -1334,7 +1509,7 @@ def _land_relationships(conn, parsed: dict, rep_id: int) -> int:
     return made
 
 
-def _land_same_as(conn, parsed: dict, rep_id: int) -> int:
+def _land_same_as(conn, parsed: dict, rep_id: int, case: str | None = None) -> int:
     """Persist identity merges (one real actor behind multiple handles) as a high-signal
     'same_as' edge. NOT a hard node-merge (destructive — the analyst decides) and NOT a
     cross-alias (that would make a name resolve to two entities and corrupt lookups) —
@@ -1352,8 +1527,8 @@ def _land_same_as(conn, parsed: dict, rep_id: int) -> int:
             if s.get("corroborated") is False:
                 continue
             # C3: identity merges connect EXISTING nodes; no ungated infra creation.
-            a = _resolve_entity_id(conn, s.get("entity_a"), rep_id, create_infra=False)
-            b = _resolve_entity_id(conn, s.get("entity_b"), rep_id, create_infra=False)
+            a = _resolve_entity_id(conn, s.get("entity_a"), rep_id, create_infra=False, case=case)
+            b = _resolve_entity_id(conn, s.get("entity_b"), rep_id, create_infra=False, case=case)
             if not a or not b or a == b:
                 continue
             # G-NAMECOLLISION: don't conflate two same-named PEOPLE on a weak signal —
@@ -1361,8 +1536,10 @@ def _land_same_as(conn, parsed: dict, rep_id: int) -> int:
             if _namesake_collision_risk(conn, a, b, conf):
                 continue
             ev = str(s.get("provenance") or "")[:200]
-            db.upsert_typed_relationship(conn, a, b, "same_as", confidence=conf,
-                                         evidence=ev, provenance=ev or "agent")
+            from investigations import store
+            store.apply_mutation(conn, store.edge_upserted(
+                case, a, b, "same_as", actor="agent", confidence=conf,
+                evidence=ev, provenance=ev or "agent"))
             made += 1
         except Exception:
             continue
@@ -1391,7 +1568,7 @@ def _namesake_collision_risk(conn, a: int, b: int, conf: str) -> bool:
     return shared is None   # risky → split when there's no corroborating shared link
 
 
-def _land_contradictions(conn, parsed: dict, rep_id: int) -> int:
+def _land_contradictions(conn, parsed: dict, rep_id: int, case: str | None = None) -> int:
     """G-CONTRADICT (4_points Phase-3 step 3): persist the agent's reported contradictions
     as 'contradicts' edges, keeping BOTH conflicting claims visible — never silently pick
     one. The agent emits `contradictions: [{entity_a, entity_b, note}]` for facts that
@@ -1399,13 +1576,15 @@ def _land_contradictions(conn, parsed: dict, rep_id: int) -> int:
     made = 0
     for c in parsed.get("contradictions", []) or []:
         try:
-            a = _resolve_entity_id(conn, c.get("entity_a"), rep_id, create_infra=False)
-            b = _resolve_entity_id(conn, c.get("entity_b"), rep_id, create_infra=False)
+            a = _resolve_entity_id(conn, c.get("entity_a"), rep_id, create_infra=False, case=case)
+            b = _resolve_entity_id(conn, c.get("entity_b"), rep_id, create_infra=False, case=case)
             if not a or not b or a == b:
                 continue
             ev = str(c.get("note") or c.get("provenance") or "")[:200]
-            db.upsert_typed_relationship(conn, a, b, "contradicts",
-                                         evidence=ev, provenance=ev or "agent")
+            from investigations import store
+            store.apply_mutation(conn, store.edge_upserted(
+                case, a, b, "contradicts", actor="agent",
+                evidence=ev, provenance=ev or "agent"))
             made += 1
         except Exception:
             continue
@@ -1451,75 +1630,6 @@ def _attach_osint_dossier(conn, entity_id: int, parsed: dict) -> None:
         pass
 
 
-def backfill_osint_dossiers(conn, case: str | None) -> int:
-    """One-time: attach already-stored agent findings to their target entities' dossiers
-    (for runs that landed before _attach_osint_dossier existed)."""
-    import json as _json
-    rows = conn.execute(
-        "SELECT id, entity_id FROM enrichment_runs WHERE provider_slug='agent' "
-        "AND entity_id IS NOT NULL " + ("AND investigation = ? " if case else ""),
-        ((case,) if case else ())).fetchall()
-    n = 0
-    for run in rows:
-        findings = []
-        for er in conn.execute(
-            "SELECT raw_json FROM enrichment_results WHERE run_id=?", (run["id"],)).fetchall():
-            try:
-                findings.append(_json.loads(er["raw_json"]))
-            except Exception:
-                pass
-        if findings:
-            _attach_osint_dossier(conn, run["entity_id"], {"findings": findings})
-            n += 1
-    conn.commit()
-    return n
-
-
-def backfill_lost_findings(conn, case: str | None) -> tuple[int, int]:
-    """Recover findings that the old brittle parser dropped (the agent emitted
-    `{\\n "findings"` with whitespace; the parser missed it). The JSON is still in each
-    run's stored narration — re-parse it with the fixed parser and land the findings as
-    enrichment_results under the existing run, gated honestly + attached to the dossier."""
-    import json as _json
-    where = "AND investigation = ? " if case else ""
-    runs = conn.execute(
-        f"SELECT id, entity_id, agent_process FROM enrichment_runs "
-        f"WHERE provider_slug='agent' {where}", ((case,) if case else ())).fetchall()
-    n_runs = n_finds = 0
-    for run in runs:
-        if conn.execute("SELECT COUNT(*) FROM enrichment_results WHERE run_id=?",
-                        (run["id"],)).fetchone()[0]:
-            continue  # this run already has findings — leave it
-        try:
-            p = _json.loads(run["agent_process"]) if run["agent_process"] else {}
-        except Exception:
-            continue
-        parsed = _parse_findings(p.get("narration", "") or p.get("summary", ""))
-        finds = parsed.get("findings", []) or []
-        if not finds:
-            continue
-        _attribute_findings(parsed, p.get("steps", []) or [])
-        for f in finds:
-            ent = (f.get("entity") or "").strip()
-            if not ent:
-                continue
-            may, reason = _promotion_gate(f)
-            gate_note = f"\ngated: {reason}" if not may else ""
-            flag = " {{UNVALIDATED}}" if f.get("unvalidated") else ""
-            etype = f.get("entity_type", "?")
-            summary = (f"[{etype}] {f.get('claim','')}{flag}\n"
-                       f"provenance: {f.get('provenance','')}{gate_note}")
-            conn.execute(
-                "INSERT INTO enrichment_results (run_id, result_type, title, summary, url, "
-                "raw_json, confidence) VALUES (?, 'finding', ?, ?, ?, ?, ?)",
-                (run["id"], ent[:200], summary[:1000], f.get("url"),
-                 json.dumps(f, ensure_ascii=False), f.get("confidence", "medium")))
-            n_finds += 1
-        if run["entity_id"]:
-            _attach_osint_dossier(conn, run["entity_id"], parsed)
-        n_runs += 1
-    conn.commit()
-    return n_runs, n_finds
 
 
 # Indicator types worth recovering from prose; everything else (phone fragments from
@@ -1581,13 +1691,19 @@ def _land_prose_indicators(conn, run_id: int, parsed: dict, finding_names: set[s
 
 def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
                   entity_id: int | None = None, process: dict | None = None,
-                  auto_promote: bool = True) -> dict:
+                  auto_promote: bool = True, started_at: str | None = None,
+                  cost_usd: float | None = None) -> dict:
     """Store the agent's findings as enrichment_results under an 'agent' run, plus
     the agent's process trail. With auto_promote (default), the agent builds the
     GRAPH itself — each finding is promoted to a node immediately, no human gate.
     promote_result self-filters: only real indicators (domain/IP/URL) become nodes,
     prose answers are rejected. The analyst stays the authority by REVIEWING the
-    graph after the fact (and can prune), not by gating every node up front."""
+    graph after the fact (and can prune), not by gating every node up front.
+
+    `started_at` (UTC 'YYYY-MM-DD HH:MM:SS') + `cost_usd` record the run's real
+    wall-clock + spend on the enrichment_runs row. When omitted, started_at falls back
+    to CURRENT_TIMESTAMP (==finished_at, the old cost-blind behavior) and cost_usd stays
+    NULL — so existing callers are unchanged."""
     import json as _json
     from investigations.enrich import promote as promote_mod
     from investigations.enrich.promote import _enrichment_report
@@ -1601,6 +1717,10 @@ def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
                 "results": 0, "promoted": 0, "gated": 0, "relationships": 0,
                 "same_as": 0, "prose_indicators": 0, "summary": ""}
     _ensure_agent_provider(conn)
+    # Build the case's confirmed-actor reference ONCE (PRD prd-identity-anchor), after the
+    # deleted-case early return. The promotion gate uses it to annotate findings that match a
+    # confirmed actor (annotation only). Empty (no-op) until the analyst has confirmed an actor.
+    reference = identity_anchor.build_reference(conn, case)
     # Carry the agent's verdict + negative findings + next-pivot recommendation onto
     # the run record so the Run trail + brief show "who/what this is, how confident,
     # what was cleared, and what to chase next" — not just a flat fact list.
@@ -1608,11 +1728,14 @@ def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
               if parsed.get(k)}
     if process is not None and extras:
         process = {**process, **extras}
+    # started_at = the run's real start (COALESCE falls back to now when not supplied, so
+    # legacy callers keep started_at==finished_at); cost_usd = the run's real spend.
     cur = conn.execute(
         "INSERT INTO enrichment_runs (entity_id, provider_slug, query, mode, status, "
-        "investigation, finished_at, agent_process) "
-        "VALUES (?, 'agent', ?, 'investigate', 'success', ?, CURRENT_TIMESTAMP, ?)",
-        (entity_id, task[:300], case,
+        "investigation, started_at, finished_at, cost_usd, agent_process) "
+        "VALUES (?, 'agent', ?, 'investigate', 'success', ?, "
+        "COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP, ?, ?)",
+        (entity_id, task[:300], case, started_at, cost_usd,
          _json.dumps(process) if process else None))
     run_id = cur.lastrowid
     n = 0
@@ -1626,7 +1749,7 @@ def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
         finding_names.add(ent)
         # The gate decides if this finding may auto-build the graph. Computed BEFORE
         # the insert so the reason is stored on the result for the analyst to see.
-        may_promote, gate_reason = _promotion_gate(f)
+        may_promote, gate_reason = _promotion_gate(f, reference)
         if not may_promote:
             f["gate_reason"] = gate_reason
         flag = " {{UNVALIDATED}}" if f.get("unvalidated") else ""
@@ -1655,6 +1778,9 @@ def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
     if auto_promote:
         for rid in result_ids:
             try:
+                # promote_result captures the finding's evidence on the promoted node
+                # (ea-1) — the capture lives there so manual + agent promotion share
+                # one code path.
                 if not promote_mod.promote_result(conn, rid, analyst="agent").get("error"):
                     promoted += 1
             except Exception:
@@ -1667,17 +1793,27 @@ def land_findings(conn, case: str | None, target: str, task: str, parsed: dict,
     # The agent's discovered STORY: typed/directed edges + identity merges, written
     # with their real rel_type + confidence (the old path only ever made 'enriched').
     rep_id = _enrichment_report(conn, case)
-    rels = _land_relationships(conn, parsed, rep_id)
-    same = _land_same_as(conn, parsed, rep_id)
-    contradictions = _land_contradictions(conn, parsed, rep_id)
+    rels = _land_relationships(conn, parsed, rep_id, case=case)
+    same = _land_same_as(conn, parsed, rep_id, case=case)
+    contradictions = _land_contradictions(conn, parsed, rep_id, case=case)
     # Recover indicators named only in the summary prose as gated /enrich items
     # (WS3 — the RCA's vanished-prose-domains gap). Never auto-promoted.
     prose_indicators = _land_prose_indicators(
         conn, run_id, parsed, finding_names,
         extra_text=(process or {}).get("narration", "") if isinstance(process, dict) else "")
     conn.commit()
+    # Rescore AFTER the late edge writes above (_land_relationships/_land_same_as/
+    # _land_contradictions) — promote_result's internal recompute ran before these
+    # edges existed, leaving them invisible to the score formula's degree term.
+    try:
+        from investigations import analyze as _analyze
+        rescored = _analyze.compute_threat_scores(conn)
+        log.info("land_findings: rescored %d entities after edge writes", rescored)
+    except Exception as exc:
+        log.warning("land_findings: score recompute failed: %s: %s",
+                    type(exc).__name__, exc)
     return {"run_id": run_id, "results": n, "promoted": promoted, "gated": gated,
-            "relationships": rels, "same_as": same,
+            "relationships": rels, "same_as": same, "contradictions": contradictions,
             "prose_indicators": prose_indicators,
             "summary": parsed.get("summary", "")}
 
@@ -1848,7 +1984,9 @@ def investigate_entity(conn, entity: str, case: str | None = None,
                              run.get("capped"), steps)
     row = conn.execute("SELECT id FROM entities WHERE canonical_name = ?", (entity,)).fetchone()
     landed = land_findings(conn, case, entity, task, parsed,
-                           entity_id=row["id"] if row else None, process=process)
+                           entity_id=row["id"] if row else None, process=process,
+                           started_at=run.get("started_at"),
+                           cost_usd=process.get("cost_usd"))
     n_findings = len(parsed.get("findings", []))
     result = {"ok": True, "entity": entity, "case": case, "findings": n_findings,
               "cost_usd": process.get("cost_usd") or 0.0, **landed}
@@ -1883,16 +2021,13 @@ QUICK_READ_TIMEOUT = int(os.environ.get("KIPI_QUICK_READ_TIMEOUT", "60"))
 
 
 def _infra_belt_for_type(entity_type: str | None) -> list[tuple[str, str | None]]:
-    """The deterministic infra providers (slug, mode) that apply to a node's type. Keyless
-    ones (crtsh/infra) always run; keyed ones (ipgeo/whoisxml) run only when configured."""
-    t = (entity_type or "").lower()
-    if t in ("domain", "subdomain"):
-        return [("crtsh", None), ("infra", "whois"), ("infra", "dns")]
-    if t == "ip":
-        return [("infra", "reverse"), ("ipgeo", None)]
-    if t == "email":
-        return [("whoisxml", "reverse_whois")]
-    return []  # handle/person/org/wallet: no infra recipe — the read runs on context alone
+    """The deterministic infra providers (slug, mode) for a node's type — a
+    thin view of the registry's static transform map (registry.BELT_RECIPES,
+    sp2-watched-types-registry): one source of "what runs on this type", not
+    a hand-rolled copy. Keyless ones (crtsh/infra) always run; keyed ones
+    (ipgeo/whoisxml) run only when configured."""
+    from investigations.enrich.registry import belt_for_type
+    return belt_for_type(entity_type)
 
 
 def _cancelled(cancel) -> bool:
@@ -1912,6 +2047,13 @@ def _run_infra_belt(conn, entity: str, entity_type: str | None, case: str | None
     eid = row["id"] if row else None
     result_ids: list[int] = []
     ran: list[str] = []
+    # crt.sh is the flakiest provider (routine 502s/hangs) and runs first in the belt — a
+    # 30s hang there dominated one-hop expand latency. Give it a tight fail-fast timeout so
+    # whois/dns aren't held up; the others keep the full timeout. KIPI_CRTSH_TIMEOUT overrides.
+    try:
+        _crtsh_to = max(3, int(os.environ.get("KIPI_CRTSH_TIMEOUT", "12")))
+    except ValueError:
+        _crtsh_to = 12
     for slug, mode in _infra_belt_for_type(entity_type):
         if _cancelled(cancel):
             if on_event:
@@ -1927,8 +2069,9 @@ def _run_infra_belt(conn, entity: str, entity_type: str | None, case: str | None
             continue
         if on_event:
             on_event(f"infra: {slug}{(' ' + mode) if mode else ''} → {entity}")
+        slug_timeout = _crtsh_to if slug == "crtsh" else timeout
         out = enrich_runner.run_and_persist(conn, slug, entity, entity_id=eid, mode=mode,
-                                            investigation=case, timeout=timeout)
+                                            investigation=case, timeout=slug_timeout)
         if out.get("status") != "success":
             continue
         ran.append(slug)
@@ -1984,6 +2127,27 @@ def _quick_read(entity: str, entity_type: str | None, digest: str, context: str)
         return ""
 
 
+def _suggest_next_hop(entity: str, entity_type: str | None, digest: str) -> str:
+    """ONE short LLM call: given what expanding this node JUST surfaced, suggest the single
+    best NEXT hop to expand and why. The analyst drives one hop at a time; the agent advises
+    the next move (Maltego co-pilot) — e.g. domain→wallet ⇒ 'expand the wallet to find more
+    wallets it transacts with, or trace its owner.' No tools, capped, fast."""
+    if not (digest or "").strip():
+        return ""
+    system = ("You are an OSINT analyst guiding a ONE-HOP-AT-A-TIME graph investigation. "
+              "Given what expanding ONE node just surfaced, name the single best NEXT hop to "
+              "expand and WHY, in ONE concrete line. Name the specific entity or type to "
+              "expand next (e.g. 'expand wallet 0xAB… to find more wallets or its owner'; "
+              "'pivot on the shared nameserver to find sibling domains'). No preamble, no fluff.")
+    prompt = (f"Just expanded: {entity} (type={entity_type or 'unknown'}).\n"
+              f"What that one hop surfaced:\n{digest}\n\nBest next hop:")
+    try:
+        return ask(prompt, system=system, tools=False, max_tokens=160,
+                   timeout=QUICK_READ_TIMEOUT).strip()
+    except Exception:
+        return ""
+
+
 def _store_node_read(conn, entity_id: int, read: str) -> None:
     """Append the quick read to the node's dossier (same path the promote endpoint uses)."""
     from investigations import annotations as annotations_mod
@@ -1997,11 +2161,17 @@ def _store_node_read(conn, entity_id: int, read: str) -> None:
 
 
 def investigate_entity_quick(conn, entity: str, case: str | None = None,
-                             on_event=None, analyst: str = "anonymous", cancel=None) -> dict:
+                             on_event=None, analyst: str = "anonymous", cancel=None,
+                             with_read: bool = True, suggest: bool = False) -> dict:
     """ONE-HOP node investigation: deterministic infra belt (code, no LLM) + a single short
     LLM read. Fast + cheap — "info about this node", not a whole investigation. No 28-turn
     agent, no completeness recursion, no pivoting into the network. Stop-aware: `cancel`
-    interrupts the belt between lookups and skips the read."""
+    interrupts the belt between lookups and skips the read.
+
+    `with_read=False` is the Maltego EXPAND: infra belt + promote connected nodes ONLY, no
+    LLM brief — pure-deterministic, grows the graph one hop, fast (~tool latency, no model).
+    `suggest=True` adds ONE short LLM call after the hop that proposes the best NEXT hop
+    (the agent advises; the analyst drives) — returned as `next_hop`."""
     row = conn.execute("SELECT id, entity_type FROM entities WHERE canonical_name = ?",
                        (entity,)).fetchone()
     if not row:
@@ -2015,6 +2185,18 @@ def investigate_entity_quick(conn, entity: str, case: str | None = None,
         return {"ok": True, "entity": entity, "case": case, "quick": True, "stopped": True,
                 "providers_run": ran, "nodes_added": nodes_added, "read": "",
                 "worked": bool(result_ids)}
+    # Maltego EXPAND: stop after the deterministic belt + promote — no LLM brief (the slow
+    # part). The graph already grew one hop; optionally let the agent suggest the NEXT hop.
+    if not with_read:
+        next_hop = ""
+        if suggest and result_ids:
+            if on_event:
+                on_event("thinking about the next hop…")
+            next_hop = _suggest_next_hop(entity, etype, _infra_digest(conn, result_ids))
+        conn.commit()
+        return {"ok": True, "entity": entity, "case": case, "quick": True, "expand": True,
+                "providers_run": ran, "nodes_added": nodes_added, "read": "",
+                "next_hop": next_hop, "result_ids": result_ids, "worked": bool(result_ids)}
     if on_event:
         on_event("reading what we found…")
     read = _quick_read(entity, etype, _infra_digest(conn, result_ids),
@@ -2071,6 +2253,12 @@ def investigate_edge(conn, src_id: int, dst_id: int, case: str | None = None,
     src_name, dst_name, ctx = _edge_context(conn, src_id, dst_id, case)
     if not src_name or not dst_name:
         return {"ok": False, "error": "edge endpoints not found in the entity graph"}
+    if not case:
+        # Recover the slug so the verdict-append event lands in the right
+        # case's log + bumps its version (a None case logs unfiled and
+        # signals nobody — codex adversarial finding 2026-06-11).
+        from investigations.enrich.promote import _primary_case
+        case = _primary_case(conn, src_id) or _primary_case(conn, dst_id)
     thesis = _case_thesis(conn, case)
     thesis_line = f"\n\nCASE THESIS — dig toward this: {thesis}." if thesis else ""
     task = (f"{ctx}{thesis_line}\n\nInvestigate whether and HOW these two are connected. "
@@ -2094,12 +2282,9 @@ def investigate_edge(conn, src_id: int, dst_id: int, case: str | None = None,
     # Append the agent's verdict to the edge's evidence (don't clobber the original).
     verdict = (parsed.get("assessment") or {}).get("best_judgment") or parsed.get("summary") or ""
     if verdict:
-        conn.execute(
-            "UPDATE typed_relationships SET evidence = "
-            "  COALESCE(NULLIF(evidence, ''), '') || ? "
-            "WHERE status = 'active' AND ((src_entity_id = ? AND dst_entity_id = ?) "
-            "OR (src_entity_id = ? AND dst_entity_id = ?))",
-            (f"\n[agent] {verdict[:300]}", src_id, dst_id, dst_id, src_id))
+        from investigations import store
+        store.apply_mutation(conn, store.edge_evidence_appended(
+            case, src_id, dst_id, f"\n[agent] {verdict[:300]}", actor="agent"))
         conn.commit()
     return {"ok": True, "src": src_name, "dst": dst_name, "case": case,
             "findings": len(parsed.get("findings", [])), "verdict": verdict[:300],
@@ -2124,10 +2309,13 @@ ROLE_AGENTS = [
      "tools": ["mcp__kipi-osint__crtsh_subdomains", "mcp__kipi-osint__whois_lookup",
                "mcp__kipi-osint__dns_lookup", "mcp__kipi-osint__reverse_dns",
                "mcp__kipi-osint__reverse_whois", "mcp__kipi-osint__dns_history",
-               "mcp__kipi-osint__shodan_host", "mcp__kipi-osint__censys_host"]
+               "mcp__kipi-osint__reverse_ns",
+               "mcp__kipi-osint__shodan_host", "mcp__kipi-osint__censys_host",
+               "mcp__kipi-osint__asn_lookup", "mcp__kipi-osint__greynoise",
+               "mcp__kipi-osint__opencorporates"]
               + [f"Bash(./invctl osint-tool {s}:*)" for s in
                  ("crtsh", "whois", "dns", "reverse_dns", "whoisxml", "infra",
-                  "shodan", "censys")],
+                  "shodan", "censys", "asn", "greynoise", "opencorporates")],
      "job": "Enumerate this target's INFRASTRUCTURE only: crt.sh subdomains, DNS, WHOIS/RDAP, "
             "reverse-WHOIS on the registrant email (pull sibling domains), passive/historical "
             "DNS, and HOST INTEL on any IP (shodan_host / censys_host: open ports, services, "
@@ -2399,12 +2587,24 @@ PHASE DOCTRINE (run it, loop as needed):
               (no current A record), pull
               `whoisxml --mode dns_history` for the domain's HISTORICAL IPs; the dead
               seed's old IP is the link to the live cluster.
-   - ip -> reverse_dns + whois + reputation + what else it hosts.
-   - wallet -> reputation + web_search attribution + who it pays / who funds it.
+   - ip -> asn_lookup (ASN/netblock owner) + greynoise (scanner-vs-targeted) + reverse_dns +
+           whois + reputation + what else it hosts. For a domain, dns_deep (SPF/DMARC + mail
+           provider + AXFR attempt).
+   - phone -> phone_parse (region / carrier / line-type incl. VoIP).
+   - image / file -> exif_extract (GPS + device make/model/serial from EXIF).
+   - wallet -> wallet_tokens (ERC-20 token flow) + tron_wallet (Tron/TRC-20) + solana_wallet
+               (Solana) + blockchair_tx (LTC/BCH/DOGE) + ton_tx (TON) + wallet_cluster
+               (BTC exchange cluster, T3 lead) + ofac_screen (sanctions, T1) + ens_resolve
+               (name<->address) + wallet_labels (exchange/mixer tag, T3 only) +
+               crypto_abuse (scam blocklist, T3 lead) + reputation +
+               web_search attribution + who it pays / who funds it.
    - affiliate/ref id -> web_search the code; the SAME code on other sites = same crew.
-   - email / handle -> web_search + social; tie them to the operator. For a REGISTRANT
-                       email, `whoisxml --mode reverse_whois` returns its full domain
-                       portfolio (the operator's other sites = same crew).
+   - email / handle -> web_search + social + holehe (email -> ~120 site registrations, T3
+                       leads) + opencorporates (org/person -> officers/filings, T1 registry) +
+                       git_emails (commit-author emails from a repo/handle) + darkweb_search
+                       (Ahmia .onion leads — T3, hypothesis not finding); tie them to the
+                       operator. For a REGISTRANT email, `whoisxml --mode reverse_whois`
+                       returns its full domain portfolio (the operator's other sites = same crew).
    - content platform (tiktok / youtube / twitter-x / instagram URL or @handle)
               -> social_scrape: pull the profile + recent posts + transcript. A creator/
                  operator's actual content is the richest source — read it, don't just
@@ -2721,6 +2921,33 @@ def _in_scope(conn, name: str, case: str | None) -> bool:
     return bool(linked)
 
 
+def write_case_seeds(conn, case: str | None) -> int:
+    """Materialize the case's intake entities as scoring seeds (PRD
+    graph-machinery-activation, gma-1): every non-noise entity mentioned in the
+    analyst's intake reports (anything that is not enrichment/manual output)
+    gets a `seeds` row, so compute_threat_scores' seed prior + propagation light
+    up the graph the agent builds outward from those entry points. Idempotent:
+    UNIQUE(entity_id, source_file) makes re-runs no-ops. Returns rows added."""
+    if not case:
+        return 0
+    rows = conn.execute(
+        "SELECT DISTINCT e.id FROM entities e "
+        "JOIN mentions m ON m.entity_id = e.id "
+        "JOIN reports r ON r.id = m.report_id "
+        "WHERE r.investigation = ? "
+        "AND r.source_type NOT IN ('enrichment', 'manual') "
+        "AND (e.notes IS NULL OR e.notes NOT LIKE 'role:noise%')",
+        (case,)).fetchall()
+    added = 0
+    for r in rows:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO seeds (entity_id, label, source_file, weight) "
+            "VALUES (?, 'case-intake', ?, 1.0)", (r["id"], f"case:{case}"))
+        added += cur.rowcount
+    conn.commit()
+    return added
+
+
 def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_TURNS,
                              timeout: int = CASE_TIMEOUT, use_mcp: bool = True,
                              on_event=None, cancel=None,
@@ -2745,6 +2972,11 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
     # Seed-persistence (k4p-01): materialize a domain node for every url-seed host so
     # EVERY user seed is a first-class node the agent works and edges can link to.
     swarm.ensure_seed_domains(conn, case)
+    # Scoring seeds (gma-1): the intake roster becomes `seeds` rows so the score
+    # formula's seed prior + propagation cover the graph this run builds.
+    seeded = write_case_seeds(conn, case)
+    if seeded and on_event:
+        on_event(f"registered {seeded} intake entit(y/ies) as scoring seeds")
     # Stage-2 pre-seed (speed-cost-staged-rollout): the deterministic infra sweep runs
     # in CODE before the agent boots — first nodes hit the canvas in seconds instead of
     # at end-of-run, and the agent starts from a built graph. ADDITIVE ONLY: the agent
@@ -2767,6 +2999,9 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
             # the investigation itself.
             if on_event:
                 on_event(f"pre-seed skipped ({exc}) — agent runs from raw seeds")
+    # Ground every pass in the case's confirmed actors (PRD prd-identity-anchor). Built ONCE;
+    # reference_prompt is '' for an empty reference, so day-one cases are unchanged.
+    reference = identity_anchor.build_reference(conn, case)
     cost_cap = swarm.DEEP_COST_CAP_USD
     seen: set[str] = set()
     agg = {"results": 0, "promoted": 0, "gated": 0, "prose_indicators": 0,
@@ -2827,6 +3062,8 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
         # G-INFRA-FIRST: pass 0 enumerates with infra tools ONLY (no web recall); later
         # passes get the full belt for attribution.
         pass_tools = _infra_first_allowlist(_live_allowed_tools()) if pass_no == 0 else None
+        # Append the confirmed-actor grounding to this pass's task ('' when no actor confirmed).
+        task = task + identity_anchor.reference_prompt(reference)
         run = _run_agent(task, max_turns=max_turns, timeout=timeout, use_mcp=use_mcp,
                          on_event=on_event,
                          persona=CASE_PERSONA_BOUNDED if bound_roster else CASE_PERSONA,

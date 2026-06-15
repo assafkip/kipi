@@ -42,30 +42,30 @@ def _client(dbp, mp):
     return c
 
 
-def test_welcome_is_on_every_page(mp):
+# The first-run welcome modal was REMOVED on purpose (founder call: a daily
+# tool, not a tour — the modal covered the actual feature; decision recorded
+# as a comment in _layout.html). These tests now pin the REMOVAL so the modal
+# cannot silently creep back.
+
+
+def test_welcome_modal_stays_removed(mp):
     with tempfile.TemporaryDirectory() as tmp:
         c = _client(Path(tmp) / "t.db", mp)
         for path in ("/cases", "/simple"):
             html = c.get(path).text
-            _check(f"{path}: welcome present", "New here? Here's how it works." in html)
-            _check(f"{path}: 'How it works' reopener present", "How it works" in html)
+            _check(f"{path}: no welcome modal", "New here? Here's how it works." not in html)
+            _check(f"{path}: no welcome localStorage flag", "kipi_welcome_seen" not in html)
 
 
-def test_welcome_frames_the_four_steps_and_a_start(mp):
-    with tempfile.TemporaryDirectory() as tmp:
-        c = _client(Path(tmp) / "t.db", mp)
-        html = c.get("/cases").text
-        # Schema/Understand step removed — the tool models the case itself.
-        for step in ("Intake", "Investigate", "Deliver", "Portfolio"):
-            _check(f"step framed: {step}", step in html)
-        _check("no Understand/schema step in the welcome", "Understand" not in html)
-        _check("offers the zero-setup start (Quick look)", "Try Quick look" in html)
-        _check("offers the case start", "Start with a case" in html)
-        _check("shows once via localStorage flag", "kipi_welcome_seen" in html)
+def test_removal_decision_is_recorded_in_layout(mp):
+    layout = (Path(__file__).resolve().parents[1] /
+              "webapp" / "templates" / "_layout.html").read_text()
+    _check("removal decision comment present",
+           "welcome modal removed" in layout)
 
 
 def main():
-    for fn in (test_welcome_is_on_every_page, test_welcome_frames_the_four_steps_and_a_start):
+    for fn in (test_welcome_modal_stays_removed, test_removal_decision_is_recorded_in_layout):
         mp = _MP()
         try:
             fn(mp)

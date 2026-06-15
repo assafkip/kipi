@@ -1,11 +1,20 @@
 {% extends "_layout.html" %}
 {% block title %}Graph · kipi-investigations{% endblock %}
 {% block content %}
+<!-- fcose continuous-physics layout (sp0-graph-cosmetics). Loaded here, not in
+     _layout.html: only the graph page uses it. Same graceful pattern as dagre —
+     the UMD bundles self-register against the global cytoscape; a failed CDN
+     load just hides the option via the fcoseOk feature check. Order matters:
+     layout-base -> cose-base -> cytoscape-fcose. -->
+<script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+<script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+<script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
 <div x-data="graphController()" x-init="init()"
      class="h-[calc(100vh-5.5rem)] min-h-[480px] flex -mx-4 -my-5 border-t border-bg-border">
 
-  <!-- Filters sidebar -->
-  <aside class="w-72 bg-bg-card border-r border-bg-border p-4 overflow-y-auto shrink-0">
+  <!-- Filters sidebar — hidden by default (chat drives filters via typed commands:
+       "only domains", "min score 50", "search X", "show all"). Toggle for power use. -->
+  <aside x-show="showControls" x-cloak class="w-72 bg-bg-card border-r border-bg-border p-4 overflow-y-auto shrink-0">
     <h2 class="text-sm font-semibold mb-3 text-ink uppercase tracking-wider">Filters</h2>
 
     <!-- Add your own node: name + type + thumbnail, optionally linked to selection. -->
@@ -155,6 +164,7 @@
       <div class="text-ink-muted uppercase tracking-wider mb-1">Stats</div>
       <div class="text-ink">nodes: <span x-text="nodeCount"></span></div>
       <div class="text-ink">edges: <span x-text="edgeCount"></span></div>
+      <div class="text-ink">faces: <span x-text="faceCount"></span></div>
     </div>
 
     <div class="mt-4 space-y-2">
@@ -162,6 +172,7 @@
       <select x-model="layoutName" @change="reLayout()" data-testid="layout-switcher"
               class="w-full text-xs px-2 py-1.5 bg-bg-soft border border-bg-border rounded">
         <option value="cose">Force (cose)</option>
+        <template x-if="fcoseOk"><option value="fcose">Physics (fcose)</option></template>
         <template x-if="dagreOk"><option value="dagre">Hierarchy (dagre)</option></template>
         <option value="concentric">Ego rings (concentric)</option>
         <option value="circle">Circle</option>
@@ -230,12 +241,215 @@
        CONVERSATION leads (chat-primary, issue chat-primary-fallback) — you talk to the
        investigator and watch the canvas build, not drive it with buttons. -->
   <div class="flex-1 flex flex-col min-w-0">
-   <!-- Graph sub-area: canvas + a DOCKABLE right detail panel that pops in/out. -->
-   <div class="flex-[1] min-h-0 flex">
-    <div class="relative flex-1 min-w-0">
+   <!-- Graph sub-area: full-width canvas + a right SLIDE-IN overlay detail drawer
+        (ride-along match) — the drawer floats over the canvas, never squishes it. -->
+   <div class="flex-[1] min-h-0 flex relative">
+    <!-- `isolate` (isolation: isolate) traps Cytoscape's canvas z-indexes (the
+         expand-collapse layer is z-index:999) inside this stacking context. Without it
+         #cy and its wrappers are z-auto, so that 999 escapes to the root context and
+         hit-tests ABOVE the header (z-30) — clicks on the CASES dropdown fell through to
+         the graph canvas. Isolating pins the whole graph below the header/sidebar/modals. -->
+    <!-- LEFT TASK RAIL: the agents/digs I've launched (decoupled from the right node
+         drawer). Persistent, keyed by task id, survives node-switching; a side-by-side
+         column so results read alongside the graph. Full-width graph when no run is open. -->
+    <aside data-testid="dig-rail" x-show="digOrder.length" x-cloak
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="-translate-x-full opacity-0" x-transition:enter-end="translate-x-0 opacity-100"
+           x-transition:leave="transition ease-in duration-100" x-transition:leave-start="translate-x-0 opacity-100" x-transition:leave-end="-translate-x-full opacity-0"
+           class="w-80 max-w-[40%] shrink-0 bg-bg-card border-r border-bg-border overflow-y-auto flex flex-col">
+      <div class="flex items-center px-3 py-2 border-b border-bg-border shrink-0 sticky top-0 bg-bg-card z-10">
+        <span class="text-xs font-semibold text-ink flex items-center gap-1.5">🔬 Runs <span class="text-ink-faint font-normal" x-text="'(' + digOrder.length + ')'"></span></span>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+      <!-- DIG RAIL (issue persistent-dig-cards): one persistent card per investigated node.
+           Each survives switching nodes; collapse / close per card; multiple open at once. -->
+      <template x-for="did in digOrder" :key="did">
+        <div class="border-b-2 border-accent/30 bg-accent/5">
+          <div class="flex items-center justify-between gap-2 px-3 py-2">
+            <button @click="digs[did].collapsed = !digs[did].collapsed" class="flex items-center gap-1.5 min-w-0 text-left">
+              <span class="text-ink-faint text-xs" x-text="digs[did].collapsed ? '▸' : '▾'"></span>
+              <span class="font-mono text-xs font-semibold truncate text-ink" x-text="digs[did].name"></span>
+            </button>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <span x-show="digs[did].invMsg" x-cloak class="text-[10px] text-ink-muted truncate max-w-[120px]" x-text="digs[did].invMsg"></span>
+              <button @click="closeDig(did)" title="close this dig" class="text-ink-faint hover:text-sev-high text-sm leading-none">✕</button>
+            </div>
+          </div>
+          <div x-show="!digs[did].collapsed" x-cloak class="px-3 pb-3">
+            <!-- RUN PROGRESS (run-progress-semantics): per-node state + live elapsed + ETA.
+                 x-if (NOT x-show): the subtree must be ABSENT until a run has seeded
+                 progress.targets, because Alpine evaluates child x-for/x-text even while an
+                 x-show block is hidden — and a fresh dig has progress:null, which would throw
+                 (codex finding-1). '0 findings' is never the headline — running reads ⟳, a
+                 finished zero-result target reads ○ none. -->
+            <template x-if="digs[did].progress && digs[did].progress.targets && digs[did].progress.targets.length">
+              <div class="mb-2 rounded border border-bg-border bg-bg-soft p-2">
+                <div class="flex items-center justify-between gap-2 mb-1.5">
+                  <span class="text-[10px] text-ink-faint uppercase tracking-wider">Run progress</span>
+                  <span class="text-[10px] font-mono text-ink-muted flex items-center gap-1.5">
+                    <span x-show="runElapsed(digs[did])" x-text="'⏱ ' + runElapsed(digs[did])"></span>
+                    <span x-show="runEta(digs[did])" class="text-accent" x-text="runEta(digs[did])"></span>
+                  </span>
+                </div>
+                <div class="flex flex-wrap gap-1">
+                  <template x-for="t in digs[did].progress.targets" :key="t.name">
+                    <span class="text-[10px] px-1.5 py-0.5 rounded border font-mono truncate max-w-[160px]"
+                          :class="targetChipClass(t)" :title="targetChip(t)" x-text="targetChip(t)"></span>
+                  </template>
+                </div>
+                <div x-show="digs[did].progress.targets_total"
+                     class="text-[10px] text-ink-faint mt-1.5"
+                     x-text="digs[did].progress.targets_done + '/' + digs[did].progress.targets_total + ' done · ' + (digs[did].progress.findings || 0) + ' finding(s)'"></div>
+              </div>
+            </template>
+            <!-- Single-node Transforms/enrich/results — hidden on a SET-run card (_setRun),
+                 which has no single node to transform; it shows only the run progress above. -->
+            <div x-show="!digs[did]._setRun">
+            <div class="text-[10px] text-ink-faint uppercase tracking-wider mb-1.5">Transforms</div>
+            <select x-model="digs[did].enrichProvider" x-show="digs[did].providers.length"
+                    class="w-full min-w-0 bg-bg-soft border border-bg-border rounded px-2 py-1.5 text-sm mb-2">
+              <!-- Grouped by intent (Infrastructure / Threat intel / On-chain / …)
+                   with a ✓ on already-run transforms — not a flat jargon wall
+                   (issue graph-osint-dropdown-grouping). -->
+              <template x-for="g in digs[did].providerGroups" :key="g.group">
+                <optgroup :label="g.group">
+                  <template x-for="p in g.items" :key="p.slug + '|' + (p.mode || '')">
+                    <option :value="p.slug + '|' + (p.mode || '')" :disabled="!p.configured"
+                            x-text="(p.ran ? '✓ ' : '') + (p.deterministic ? '⚡ ' : '') + p.display + (p.configured ? '' : ' — needs a key (Enrich page)')"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
+            <div x-show="!digs[did].providers.length" x-cloak class="text-xs text-ink-faint mb-2">No transforms for this node type.</div>
+            <button @click="runEnrich(did)" x-show="digs[did].providers.length"
+                    :disabled="digs[did].enrichBusy || !transformConfigured(digs[did])"
+                    class="w-full mb-2 text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed font-medium">
+              <span x-show="!digs[did].enrichBusy">Run transform</span><span x-show="digs[did].enrichBusy" x-cloak>Running…</span>
+            </button>
+            <div x-show="digs[did].enrichError" x-cloak x-text="digs[did].enrichError" class="text-xs text-sev-high mb-2"></div>
+            <div x-show="digs[did].pastRuns.length" x-cloak class="mb-2">
+              <div class="text-[10px] text-ink-faint uppercase tracking-wider mb-1">Past lookups (click to view)</div>
+              <div class="flex flex-wrap gap-1">
+                <template x-for="run in digs[did].pastRuns" :key="run.id">
+                  <button @click="viewRun(did, run)"
+                          class="text-[10px] px-1.5 py-0.5 rounded border"
+                          :class="digs[did].activeRunId === run.id ? 'border-accent text-accent bg-accent/10' : 'border-bg-border text-ink-muted hover:text-ink'"
+                          x-text="run.provider_slug + (run.mode ? ('·' + run.mode) : '') + ' (' + (run.results ? run.results.length : 0) + ')'"></button>
+                </template>
+              </div>
+            </div>
+            <div x-show="digs[did].enrichResults.length" x-cloak class="space-y-1.5 max-h-80 overflow-y-auto">
+              <template x-for="res in digs[did].enrichResults" :key="res.id">
+                <div class="text-xs bg-bg-soft border border-bg-border rounded p-2">
+                  <div class="flex items-start gap-2">
+                    <div class="min-w-0 flex-1 cursor-pointer" @click="res._open = !res._open" title="explore before adding">
+                      <div class="font-medium text-ink truncate" x-text="(res._open ? '▾ ' : '▸ ') + (res.title || res.result_type)"></div>
+                      <div x-show="!res._open" class="text-ink-muted" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" x-text="res.summary"></div>
+                    </div>
+                    <button x-show="res.url" @click="promote(digs[did], res)" :disabled="res.promoted"
+                            class="shrink-0 text-[11px] px-2 py-1 rounded border border-accent/60 text-accent hover:bg-accent hover:text-white disabled:opacity-50 disabled:cursor-default"
+                            x-text="res.promoted ? '✓ on graph' : '+ node'"></button>
+                    <span x-show="!res.url" class="shrink-0 text-[10px] text-ink-faint">summary</span>
+                  </div>
+                  <div x-show="res._open" x-cloak class="mt-1.5 pt-1.5 border-t border-bg-border space-y-1">
+                    <div class="text-ink-muted markdown" x-html="renderMd(res.summary)"></div>
+                    <a x-show="res.url" :href="res.url" target="_blank" class="text-accent break-all block" x-text="res.url"></a>
+                    <pre x-show="res.raw_json" class="text-[10px] text-ink-faint bg-bg-card border border-bg-border rounded p-1.5 overflow-x-auto max-h-40 whitespace-pre" x-text="prettyJson(res.raw_json)"></pre>
+                  </div>
+                </div>
+              </template>
+            </div>
+            </div><!-- /single-node transforms (hidden on _setRun) -->
+          </div>
+        </div>
+      </template>
+      </div>
+    </aside>
+    <div class="relative flex-1 min-w-0 isolate">
     <!-- Blueprint dot-grid -->
-    <div id="cy" class="absolute inset-0"
+    <!-- `isolate` on #cy traps Cytoscape's canvas z-indexes (the expand-collapse layer is
+         z-999) INSIDE #cy. Without it that 999 competes in the wrapper's stacking context
+         and covers the in-canvas overlays (filters toggle, selection chip, next-hop banner,
+         node card — all z-10), so their clicks fell through to the graph. Isolating #cy
+         pins the whole canvas below those overlays; they become clickable again. -->
+    <div id="cy" class="absolute inset-0 isolate"
          style="background-color:#FAFAF9; background-image:radial-gradient(#E0DDD6 1px, transparent 1px); background-size:22px 22px;"></div>
+    <!-- Controls toggle: the filters live behind this so the canvas reads clean by
+         default. The chat covers the same filters by typed command. -->
+    <button @click="showControls = !showControls; setTimeout(() => { if (this.cy) this.cy.resize(); }, 200)" x-cloak
+            class="absolute top-2 left-2 z-10 text-xs px-2 py-1 rounded border border-bg-border bg-bg-card/90 text-ink-muted hover:text-accent hover:border-accent shadow-sm"
+            :title="showControls ? 'Hide filters' : 'Show filters'"
+            x-text="showControls ? '× filters' : '⚙ filters'"></button>
+
+    <!-- Whole-case ASSESSMENT toggle (assessment-dossier-promotion): opens the verdict as a
+         right slide-in overlay so the analyst reads the bottom line without leaving the graph. -->
+    <button @click="openAssessment()" x-cloak
+            class="absolute top-2 right-2 z-10 text-xs px-2 py-1 rounded border border-bg-border bg-bg-card/90 text-ink-muted hover:text-accent hover:border-accent shadow-sm"
+            title="Whole-case assessment / bottom line">⚖ Assessment</button>
+
+    <!-- ASSESSMENT overlay: the whole-case verdict as a right slide-in PEER of the node drawer.
+         Its OWN aside + assessmentOpen state (decoupled from selected/panelOpen/digOrder/chat).
+         One right overlay at a time — openAssessment() calls setPanel(false). z-30 above the
+         node drawer (z-20) as a safety, though they are never both shown. -->
+    <aside x-show="assessmentOpen" x-cloak
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="translate-x-full opacity-0" x-transition:enter-end="translate-x-0 opacity-100"
+           x-transition:leave="transition ease-in duration-100" x-transition:leave-start="translate-x-0 opacity-100" x-transition:leave-end="translate-x-full opacity-0"
+           class="absolute top-0 right-0 bottom-0 w-96 max-w-[92%] z-30 bg-bg-card border-l border-bg-border overflow-y-auto shadow-pop">
+      <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-bg-border sticky top-0 bg-bg-card z-10">
+        <h2 class="font-semibold text-ink flex items-center gap-1.5">⚖ Assessment</h2>
+        <div class="flex items-center gap-2">
+          <span x-show="assessment && assessment.stale" x-cloak title="the brief is older than the current evidence — regenerate on Deliverables"
+                class="text-[10px] px-1.5 py-0.5 rounded bg-sev-high/10 text-sev-high border border-sev-high/30">stale</span>
+          <button @click="closeAssessment()" title="close" class="text-ink-muted hover:text-ink text-lg leading-none">›</button>
+        </div>
+      </div>
+      <div class="p-4">
+        <template x-if="assessment && assessment.has_brief">
+          <div class="markdown text-sm text-ink-muted leading-relaxed" x-html="renderMd(assessment.markdown)"></div>
+        </template>
+        <template x-if="assessment && !assessment.has_brief">
+          <div class="text-sm text-ink-faint">No assessment yet — run the case, or open Deliverables to generate the brief.</div>
+        </template>
+        <div class="mt-4 pt-3 border-t border-bg-border">
+          <button @click="window.kipiNav && window.kipiNav.go('/synthesis')"
+                  class="text-sm text-accent hover:underline">Open full assessment →</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Selection chip (Maltego): shift+drag box-selects nodes into the set; this shows the
+         list with Copy / Investigate / Clear, independent of the detail panel. -->
+    <div x-show="selectedSet.length" x-cloak
+         class="absolute bottom-2 left-2 z-10 w-64 max-h-[55%] flex flex-col bg-bg-card border border-bg-border rounded shadow-pop text-xs">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-bg-border shrink-0">
+        <span class="font-semibold text-ink"><span x-text="selectedSet.length"></span> selected</span>
+        <div class="flex gap-2">
+          <button @click="explainCluster()" :disabled="explainBusy" class="text-accent hover:underline disabled:opacity-50" title="plain-English read of this cluster" x-text="explainBusy ? '…' : 'what is this?'"></button>
+          <button @click="copySelection()" class="text-accent hover:underline" x-text="copiedSet ? 'copied ✓' : 'copy'"></button>
+          <button @click="expandSelected()" :disabled="invBusy" class="text-accent hover:underline disabled:opacity-50" title="one hop beyond the set">expand</button>
+          <button @click="investigateSelected()" :disabled="invBusy" class="text-ink-muted hover:text-accent disabled:opacity-50" title="full multi-hop agent (slower)">deep</button>
+          <button x-show="invBusy" x-cloak @click="stopInvestigate()" class="text-sev-high hover:underline" title="stop the set run, keep what landed">stop</button>
+          <button @click="clearSelection()" class="text-ink-muted hover:text-accent">clear</button>
+        </div>
+      </div>
+      <ul class="overflow-y-auto px-3 py-2 space-y-1">
+        <template x-for="s in selectedSet" :key="s.id">
+          <li class="font-mono truncate text-ink" x-text="s.name"></li>
+        </template>
+      </ul>
+    </div>
+
+    <!-- Suggested NEXT hop (co-pilot): a canvas banner so it shows after any expand —
+         single node OR a selected set — independent of the detail panel. -->
+    <div x-show="nextHop" x-cloak
+         class="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 max-w-xl bg-accent/10 border border-accent/40 rounded-lg shadow-pop px-4 py-2.5">
+      <div class="flex items-start gap-3">
+        <div class="min-w-0">
+          <div class="text-[10px] uppercase tracking-wider text-accent font-semibold mb-0.5">Suggested next hop</div>
+          <div class="text-xs text-ink" x-text="nextHop"></div>
+        </div>
+        <button @click="nextHop=''" class="shrink-0 text-ink-faint hover:text-accent text-sm leading-none">×</button>
+      </div>
+    </div>
 
     <!-- Empty state — shows when filters/scope exclude everything -->
     <div x-show="loaded && nodeCount === 0 && !runActive" x-cloak
@@ -263,9 +477,14 @@
             title="show details">‹</button>
 
     <!-- Selected node panel — DOCKED right column, pops in/out (panelOpen). -->
-    <aside x-show="selected && panelOpen" x-cloak
-           class="w-96 shrink-0 bg-bg-card border-l border-bg-border overflow-y-auto relative"
+    <aside data-testid="node-drawer" x-show="selected && panelOpen && !selectedEdge" x-cloak
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="translate-x-full opacity-0" x-transition:enter-end="translate-x-0 opacity-100"
+           x-transition:leave="transition ease-in duration-100" x-transition:leave-start="translate-x-0 opacity-100" x-transition:leave-end="translate-x-full opacity-0"
+           class="absolute top-0 right-0 bottom-0 w-96 max-w-[92%] z-20 bg-bg-card border-l border-bg-border overflow-y-auto shadow-pop"
            x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0">
+
+      <!-- QUICK-PEEK: lightweight identity for the currently-selected node (transient). -->
+      <div x-show="selected" x-cloak>
       <div class="p-4 border-b border-bg-border">
         <div class="flex items-start justify-between mb-2">
           <div>
@@ -305,6 +524,17 @@
         </table>
       </div>
 
+      <!-- ORIGIN: where this node came from, so it's never "out of nowhere" (founder
+           2026-06-11). Works for found nodes too — they trace to the target the
+           investigator was digging when they surfaced. Always shown. -->
+      <div x-show="detail && detail.origin_trail" x-cloak
+           class="px-4 py-2.5 border-b border-bg-border bg-accent/5 text-xs text-ink">
+        <span class="uppercase tracking-wider text-[10px] text-ink-faint">Origin</span>
+        <div class="mt-0.5">
+          <span x-text="detail?.origin_trail?.trail"></span><template x-if="detail?.origin_trail?.when"><span class="text-ink-faint" x-text="' · ' + detail.origin_trail.when"></span></template>
+        </div>
+      </div>
+
       <!-- Provenance: how this node entered the graph (ingest / enrich:<provider> / agent / analyst). -->
       <div x-show="detail && detail.provenance" x-cloak class="px-4 py-2 border-b border-bg-border text-[11px] text-ink-faint">
         <span class="uppercase tracking-wider">source:</span>
@@ -314,67 +544,40 @@
       <!-- What the investigation found (incl. prose attributions that aren't graph nodes). -->
       <div x-show="detail && detail.dossier" x-cloak class="p-4 border-b border-bg-border">
         <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">What we found</div>
-        <div class="text-xs text-ink-muted leading-relaxed markdown"
+        <div class="text-xs text-ink-muted leading-relaxed markdown max-h-56 overflow-y-auto pr-1"
              x-html="renderMd((detail?.dossier || '').replace(/<!--\/?osint-->/g, '').trim())"></div>
       </div>
 
-      <div class="p-4">
+      <!-- Actions: fast deterministic Expand, then the deep agent. Both open results in
+           a dig card above; the full dossier opens in-app (Back returns). One block,
+           side-by-side — not a wall of stacked teal buttons. -->
+      <div class="p-4 border-b border-bg-border space-y-2">
+        <div class="flex gap-2">
+          <button @click="expandNode()" :disabled="invBusy"
+                  class="flex-1 text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
+            <span x-show="!invBusy">⊕ Expand</span><span x-show="invBusy" x-cloak>Expanding…</span>
+          </button>
+          <button @click="investigateThisNode()" :disabled="invBusy"
+                  class="flex-1 text-sm px-3 py-2 border border-bg-border rounded text-ink-muted hover:border-accent hover:text-accent disabled:opacity-50">
+            <span x-show="!invBusy">🔍 Investigate</span><span x-show="invBusy" x-cloak>Starting…</span>
+          </button>
+        </div>
+        <button x-show="invBusy" x-cloak @click="stopInvestigate()"
+                class="w-full text-xs px-3 py-1.5 rounded border border-sev-high text-sev-high hover:bg-sev-high/10">■ Stop &amp; keep</button>
+        <div x-show="invMsg" x-cloak class="text-xs text-ink-muted" x-text="invMsg"></div>
+        <div class="text-[11px] text-ink-faint">Expand = fast infra (whois/DNS/certs). Investigate = AI agent, slower.</div>
+        <div class="flex items-center gap-3 pt-0.5 text-xs">
+          <a :href="'/entity/' + selected?.id" class="text-accent hover:underline">Open full dossier →</a>
+          <button @click="openDig(selected)" class="text-ink-muted hover:text-accent">+ dig card</button>
+        </div>
+        <!-- Your call: the analyst is the TOP authority — parity with the entity
+             page's assert panel (issue graph-drawer-ux-parity, cross-surface UX
+             contract). The full assert UI lives on the entity page; the drawer
+             exposes the affordance + the same "you're the authority" framing so the
+             analyst always sees they can override the AI from here too. -->
         <a :href="'/entity/' + selected?.id"
-           class="block text-center bg-accent text-white px-3 py-2 rounded hover:bg-accent-hover text-sm font-medium">
-          Open full dossier →
-        </a>
-      </div>
-
-      <!-- Enrich this actor right from the graph; promote results into nodes. -->
-      <div class="p-4 border-t border-bg-border">
-        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Enrich</div>
-        <select x-model="enrichProvider"
-                class="w-full min-w-0 bg-bg-soft border border-bg-border rounded px-2 py-1.5 text-sm mb-2">
-          <template x-for="p in providers" :key="p.slug">
-            <option :value="p.slug" x-text="p.display_name + (p.configured ? '' : ' (needs key)')"></option>
-          </template>
-        </select>
-        <button @click="runEnrich()" :disabled="enrichBusy || !enrichProvider"
-                class="w-full mb-2 text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed font-medium">
-          <span x-show="!enrichBusy">Run enrichment</span><span x-show="enrichBusy" x-cloak>Running…</span>
-        </button>
-        <div x-show="enrichError" x-cloak x-text="enrichError" class="text-xs text-sev-high mb-2"></div>
-
-        <!-- Past lookups: click to view cached results — no re-search. -->
-        <div x-show="pastRuns.length" x-cloak class="mb-2">
-          <div class="text-[10px] text-ink-faint uppercase tracking-wider mb-1">Past lookups (click to view)</div>
-          <div class="flex flex-wrap gap-1">
-            <template x-for="run in pastRuns" :key="run.id">
-              <button @click="viewRun(run)"
-                      class="text-[10px] px-1.5 py-0.5 rounded border"
-                      :class="activeRunId === run.id ? 'border-accent text-accent bg-accent/10' : 'border-bg-border text-ink-muted hover:text-ink'"
-                      x-text="run.provider_slug + (run.mode ? ('·' + run.mode) : '') + ' (' + (run.results ? run.results.length : 0) + ')'"></button>
-            </template>
-          </div>
-        </div>
-
-        <div x-show="enrichResults.length" x-cloak class="space-y-1.5 max-h-80 overflow-y-auto">
-          <template x-for="res in enrichResults" :key="res.id">
-            <div class="text-xs bg-bg-soft border border-bg-border rounded p-2">
-              <div class="flex items-start gap-2">
-                <div class="min-w-0 flex-1 cursor-pointer" @click="res._open = !res._open" title="explore before adding">
-                  <div class="font-medium text-ink truncate" x-text="(res._open ? '▾ ' : '▸ ') + (res.title || res.result_type)"></div>
-                  <div x-show="!res._open" class="text-ink-muted" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" x-text="res.summary"></div>
-                </div>
-                <button x-show="res.url" @click="promote(res)" :disabled="res.promoted"
-                        class="shrink-0 text-[11px] px-2 py-1 rounded border border-accent/60 text-accent hover:bg-accent hover:text-white disabled:opacity-50 disabled:cursor-default"
-                        x-text="res.promoted ? '✓ on graph' : '+ node'"></button>
-                <span x-show="!res.url" class="shrink-0 text-[10px] text-ink-faint">summary</span>
-              </div>
-              <!-- Expanded: explore the full info before deciding to add. -->
-              <div x-show="res._open" x-cloak class="mt-1.5 pt-1.5 border-t border-bg-border space-y-1">
-                <div class="text-ink-muted markdown" x-html="renderMd(res.summary)"></div>
-                <a x-show="res.url" :href="res.url" target="_blank" class="text-accent break-all block" x-text="res.url"></a>
-                <pre x-show="res.raw_json" class="text-[10px] text-ink-faint bg-bg-card border border-bg-border rounded p-1.5 overflow-x-auto max-h-40 whitespace-pre" x-text="prettyJson(res.raw_json)"></pre>
-              </div>
-            </div>
-          </template>
-        </div>
+           class="block text-[11px] text-ink-faint hover:text-accent"
+           title="You're the authority — state a fact and it overrides the report everywhere it's used">⚖ Your call — assert / override the AI →</a>
       </div>
 
       <!-- Clusters this node belongs to: show here, or open the cluster on a new graph. -->
@@ -393,49 +596,23 @@
         </div>
       </div>
 
-      <!-- Run the full investigator agent on this one node (the autonomous OSINT dig). -->
+      <!-- Neighbors: ONE block (was three overlapping ones — Expand/Deep, "Focus this
+           node", and "Connections"). Focus the node's directed links on the canvas,
+           add them to the selected set, or branch to a new graph. Run actions live in
+           the Actions block above; set actions live on the floating set box. -->
       <div class="p-4 border-t border-bg-border">
-        <button @click="investigateThisNode()" :disabled="invBusy"
-                class="w-full text-sm px-3 py-2 bg-accent text-white rounded hover:bg-accent-hover disabled:opacity-50">
-          <span x-show="!invBusy">🔍 Investigate this node</span>
-          <span x-show="invBusy" x-cloak>Starting…</span>
-        </button>
-        <div class="text-[11px] text-ink-faint mt-1.5">Sends the investigator out to dig on
-          <span class="font-mono" x-text="selected?.full_name"></span> (whois, DNS, search, infra) and build the graph.</div>
-        <div x-show="invMsg" x-cloak class="text-xs text-ink-muted mt-1" x-text="invMsg"></div>
-      </div>
-
-      <!-- Incoming / outgoing: isolate the node's directed neighbors on the canvas. -->
-      <div class="p-4 border-t border-bg-border">
-        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Focus this node</div>
+        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Neighbors</div>
         <div class="flex flex-wrap gap-1.5">
-          <button @click="showDirection('in')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">← incoming (<span x-text="inCount"></span>)</button>
-          <button @click="showDirection('out')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">outgoing (<span x-text="outCount"></span>) →</button>
+          <button @click="showDirection('in')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">← in (<span x-text="inCount"></span>)</button>
+          <button @click="showDirection('out')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">out (<span x-text="outCount"></span>) →</button>
           <button @click="showDirection('all')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">both</button>
           <button @click="openNodeNewGraph(selected.id)" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">↗ new graph</button>
         </div>
-      </div>
-
-      <!-- PRD-08: select this node + its directed connections, then act on the whole
-           set at once (e.g. run the full agent on all of them — PRD-07). -->
-      <div class="p-4 border-t border-bg-border">
-        <div class="text-xs text-ink-muted uppercase tracking-wider mb-2">Connections (incoming / outgoing)</div>
-        <div class="flex flex-wrap gap-1.5">
-          <button @click="selectConnections('in')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ incoming</button>
-          <button @click="selectConnections('out')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ outgoing</button>
-          <button @click="selectConnections('all')" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:border-accent hover:text-accent">+ all</button>
-        </div>
-        <div x-show="selectedSet.length" x-cloak class="mt-2.5">
-          <div class="text-xs text-ink-muted mb-1.5"><span class="font-mono" x-text="selectedSet.length"></span> node(s) selected for investigation</div>
-          <div class="flex flex-wrap gap-1.5">
-            <button @click="investigateSelected()" :disabled="invBusy"
-                    class="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-50">
-              <span x-show="!invBusy">Investigate selected (<span x-text="selectedSet.length"></span>)</span>
-              <span x-show="invBusy" x-cloak>Starting…</span>
-            </button>
-            <button @click="clearSelection()" class="text-xs px-2.5 py-1 rounded border border-bg-border hover:bg-bg-soft">Clear</button>
-          </div>
-          <div x-show="invMsg" x-cloak class="text-xs text-ink-muted mt-1.5" x-text="invMsg"></div>
+        <div class="flex flex-wrap items-center gap-1.5 mt-2 text-[11px] text-ink-faint">
+          <span>add to set:</span>
+          <button @click="selectConnections('in')" class="px-2 py-0.5 rounded border border-bg-border hover:border-accent hover:text-accent">+ in</button>
+          <button @click="selectConnections('out')" class="px-2 py-0.5 rounded border border-bg-border hover:border-accent hover:text-accent">+ out</button>
+          <button @click="selectConnections('all')" class="px-2 py-0.5 rounded border border-bg-border hover:border-accent hover:text-accent">+ all</button>
         </div>
       </div>
 
@@ -489,11 +666,32 @@
           </template>
         </div>
       </div>
+      </div><!-- /quick-peek (x-show="selected") -->
     </aside>
+
+    <!-- Right-click node context menu (issue node-right-click-menu): fast actions at the
+         cursor, wiring the existing per-node methods. Closes on action / outside / tap / Esc. -->
+    <div data-testid="node-context-menu" x-show="nodeMenu.open && selected" x-cloak
+         @keydown.escape.window="nodeMenu.open = false"
+         @click.outside="nodeMenu.open = false"
+         :style="'position:fixed;z-index:60;left:' + nodeMenu.x + 'px;top:' + nodeMenu.y + 'px'"
+         class="w-56 bg-bg-card border border-bg-border rounded-lg shadow-xl py-1 text-sm">
+      <div class="px-3 py-1 text-[10px] uppercase tracking-wider text-ink-faint font-mono truncate" x-text="selected?.full_name"></div>
+      <!-- Action verbs (Expand / Investigate / open-dig) live ONLY in the right
+           detail drawer now — one canonical launch surface per action (issue
+           graph-single-action-surface, founder: "de-dupe verbs, keep rail").
+           They previously duplicated the drawer's buttons here; this menu keeps
+           the spatial/navigation shortcuts the drawer does NOT offer. -->
+      <button @click="spotlightNode(selected.id); nodeMenu.open = false" class="w-full text-left px-3 py-1.5 hover:bg-bg-soft">◎ Focus this node's web</button>
+      <button @click="openNodeNewGraph(selected.id); nodeMenu.open = false" class="w-full text-left px-3 py-1.5 hover:bg-bg-soft">↗ Open in new graph</button>
+      <a :href="'/entity/' + (selected?.id || '')" target="_blank" @click="nodeMenu.open = false" class="block px-3 py-1.5 hover:bg-bg-soft">📄 Open entity page</a>
+    </div>
 
     <!-- Edge detail — same DOCKED right column, pops in/out. -->
     <aside x-show="selectedEdge && panelOpen" x-cloak
-           class="w-96 shrink-0 bg-bg-card border-l border-bg-border overflow-y-auto relative"
+           x-transition:enter="transition ease-out duration-150" x-transition:enter-start="translate-x-full opacity-0" x-transition:enter-end="translate-x-0 opacity-100"
+           x-transition:leave="transition ease-in duration-100" x-transition:leave-start="translate-x-0 opacity-100" x-transition:leave-end="translate-x-full opacity-0"
+           class="absolute top-0 right-0 bottom-0 w-96 max-w-[92%] z-20 bg-bg-card border-l border-bg-border overflow-y-auto shadow-pop"
            x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0">
       <div class="p-4 border-b border-bg-border">
         <div class="flex items-start justify-between mb-2">
@@ -570,8 +768,21 @@
    <!-- Docked unified chat (bottom ~40%). SAME caseChat() as the corner bubble —
         one chat, two layouts ([[one-unified-chat]]). The bubble is suppressed on this
         page via the empty chat-block override at the end of this template. -->
-   <div class="flex-[1] min-h-0 border-t border-bg-border bg-bg-card">
-     {% set docked = true %}{% include "_chat.html" %}
+   <!-- Collapsible chat dock: collapsed = a thin bar so the graph dominates the column;
+        expanded = the full Investigator. Session-persisted. cy.resize() on toggle. -->
+   <div class="border-t border-bg-border bg-bg-card flex flex-col shrink-0"
+        :class="dockOpen ? 'flex-[1] min-h-0' : ''">
+     <button @click="dockOpen = !dockOpen; sessionStorage.setItem('kipiDockOpen', dockOpen ? '1' : '0'); setTimeout(() => { if (this.cy) this.cy.resize(); }, 200)"
+             class="flex items-center justify-between px-4 h-9 shrink-0 text-sm hover:bg-bg-soft"
+             :class="dockOpen ? 'border-b border-bg-border' : ''">
+       <span class="font-semibold text-ink flex items-center gap-2">🔍 Investigator
+         <span x-show="!dockOpen" x-cloak class="text-[11px] font-normal text-ink-faint">— ask a question or run a command</span>
+       </span>
+       <span class="text-ink-faint text-xs" x-text="dockOpen ? '▾ collapse' : '▸ open'"></span>
+     </button>
+     <div x-show="dockOpen" x-cloak class="flex-1 min-h-0 flex flex-col">
+       {% set docked = true %}{% include "_chat.html" %}
+     </div>
    </div>
   </div><!-- /right column -->
 </div>
@@ -581,6 +792,10 @@ const ACTIVE_CASE = {{ (nav.active_case or '')|tojson }};
 function graphController() {
   return {
     cy: null,
+    showControls: false,    // graph full-width by default (ride-along match); the ⚙ filters toggle opens the panel
+    assessmentOpen: false,  // whole-case assessment overlay (assessment-dossier-promotion); right slide-in peer of the node drawer
+    assessment: null,       // fetched {has_brief, markdown, stale, case}
+    dockOpen: (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('kipiDockOpen') === '1'),  // chat dock collapsed by default so the graph dominates; session-persisted
     minScore: 30,
     panelOpen: true,        // detail panel docked-open vs popped-out (the right-side panel)
     role: '',
@@ -602,6 +817,7 @@ function graphController() {
     _spreadBusy: false,   // a force-spread layout is animating
     layoutName: 'cose',  // analyst-picked layout; cose stays the default (issue graph-layouts)
     dagreOk: false,      // dagre CDN scripts loaded + registered (feature-checked)
+    fcoseOk: false,      // fcose CDN scripts loaded + registered (feature-checked)
     pathMode: false,     // shortest-path mode: next two node taps pick source + target
     pathSource: null,    // the first picked node id while pathMode is armed
     pathMsg: '',         // status line under the toggle ("pick the target…" / "no path")
@@ -614,16 +830,26 @@ function graphController() {
     ruleDraft: { label: '', selector: '', styleText: '', enabled: true },
     ruleMsg: '',
     edgeCount: 0,
+    faceCount: 0,           // nodes with a face (favicon/avatar) — issue node-faces-counter
     loaded: false,
     selected: null,
+    nodeMenu: { open: false, x: 0, y: 0 },   // right-click context menu (issue node-right-click-menu)
     neighbors: [],
-    selectedSet: [],          // PRD-08: node + its connections, acted on at once
-    invBusy: false, invMsg: '', invTimer: null,
-    providers: [],
-    enrichProvider: '',
-    enrichBusy: false,
-    enrichResults: [],
-    enrichError: '',
+    selectedSet: [],          // PRD-08: node + its connections (or box-selected set), acted on at once
+    copiedSet: false,         // transient "copied ✓" flash on the selection chip
+    explainBusy: false,       // "what is this?" cluster read in flight
+    nextHop: '',              // the agent's suggested NEXT hop after an expand (co-pilot)
+    invBusy: false, invMsg: '', invTimer: null, runDigId: null,
+    // Live run clock: clockNow (epoch seconds) ticks every 1s while a run is active so the
+    // dig card's elapsed reads smoothly; the ticker stops at run end so elapsed freezes at
+    // its final value (run-progress-semantics).
+    clockNow: 0, clockTimer: null,
+    // Per-node investigation state (issue persistent-dig-cards): each investigated node gets
+    // its own dig in `digs`, keyed by id, so switching nodes never destroys its results.
+    digs: {},                 // nodeId -> { id, name, type, collapsed, providers, enrichProvider,
+                              //   enrichBusy, enrichError, enrichResults, pastRuns, activeRunId,
+                              //   invMsg, _transformReq }
+    digOrder: [],             // nodeId[] — render order of the dig rail (newest first)
     etype: '',
     entityTypes: [],
     // Facet counts are derived from the nodes ACTUALLY on the canvas (computeFacets),
@@ -633,8 +859,6 @@ function graphController() {
     clusterNames: {},   // id -> name (for the cluster dropdown labels)
     baseNodes: [], baseEdges: [],
     nodeSearch: '', nodeSearchMsg: '',   // search box: jump to a node by name
-    pastRuns: [],
-    activeRunId: null,
     showAdd: false,
     addError: '',
     newNode: { name: '', type: 'indicator', thumbnail: '', link: false },
@@ -642,13 +866,12 @@ function graphController() {
                 'url', 'email', 'organization', 'hash_sha256', 'crypto_wallet', 'indicator'],
 
     async init() {
+      // Reflow Cytoscape when the left task rail appears/disappears (its width
+      // changes the canvas) — covers openDig/closeDig + the slide transition.
+      this.$watch('digOrder.length', () => { setTimeout(() => { if (this.cy) this.cy.resize(); }, 220); });
       const urlParams = new URLSearchParams(window.location.search);
-      // Provider list for graph-native enrichment (configured ones lead).
-      fetch('/api/enrich/providers').then(r => r.json()).then(d => {
-        this.providers = (d.providers || []).sort((a, b) => (b.configured) - (a.configured));
-        const firstReady = this.providers.find(p => p.configured);
-        this.enrichProvider = firstReady ? firstReady.slug : (this.providers[0]?.slug || '');
-      });
+      // The Transforms menu populates per dig (loadProvidersForDig via the registry's
+      // static type map) when a node is investigated — no init-time prefetch needed.
       // Type/role/origin/cluster filter options + counts are derived per-reload from
       // the rendered nodes (computeFacets), so they always match the canvas.
       if (urlParams.get('cluster_id')) {
@@ -669,6 +892,7 @@ function graphController() {
       this.cy = cytoscape({
         container: document.getElementById('cy'),
         style: this.style(),
+        selectionType: 'additive',   // shift+drag box-selects MULTIPLE nodes (Maltego multi-select)
         wheelSensitivity: 0.2,
         minZoom: 0.1,
         maxZoom: 4,
@@ -679,6 +903,10 @@ function graphController() {
       try {
         this.dagreOk = (typeof window.dagre !== 'undefined') && !!this.cy.layout({ name: 'dagre' });
       } catch (e) { this.dagreOk = false; }
+      // Same pattern for fcose (continuous physics).
+      try {
+        this.fcoseOk = !!this.cy.layout({ name: 'fcose' });
+      } catch (e) { this.fcoseOk = false; }
 
       // Persisted conditional formatting for this case (issue graph-style-rules).
       this.loadStyleRules();
@@ -698,16 +926,41 @@ function graphController() {
         }
       } catch (e) { this.collectionsOk = false; }
 
-      this.cy.on('tap', 'node', (evt) => this.onNodeTap(evt.target));
+      this.cy.on('tap', 'node', (evt) => {
+        const oe = evt.originalEvent || {};
+        // shift/⌘/ctrl-click accumulates into the visible set (Maltego reflex);
+        // a plain tap stays "view this node". PRD-08 Req 1.
+        if (oe.shiftKey || oe.metaKey || oe.ctrlKey) { this.toggleInSet(evt.target); return; }
+        this.onNodeTap(evt.target);
+      });
       this.cy.on('tap', 'edge', (evt) => this.onEdgeTap(evt.target));
+      // Right-click a node → a quick action menu at the cursor (issue node-right-click-menu).
+      this.cy.container().addEventListener('contextmenu', (e) => e.preventDefault());
+      this.cy.on('cxttap', 'node', (evt) => this.openNodeMenu(evt));
+      // Box-select (shift+drag) → the EXISTING selectedSet (same set the detail panel +
+      // "Investigate selected" use). Plain tap stays "view this node" (onNodeTap clears the
+      // .selected highlight, so the batch lives on the array + the canvas chip, not a class).
+      this.cy.on('boxselect', 'node', (evt) => {
+        const n = evt.target, id = n.id();
+        const name = n.data('full_name') || n.data('label') || id;
+        if (name && !String(name).startsWith('grp-') &&
+            !this.selectedSet.some(s => String(s.id) === String(id))) {
+          this.selectedSet.push({ id, name });
+          n.addClass('in-set');   // PRD-08 Req 1: box-selected nodes stay visibly marked
+        }
+      });
+      // Drop the transient native box overlay; the persistent .in-set ring (not the
+      // native :selected) is what keeps the set visible on the canvas.
+      this.cy.on('boxend', () => { this.cy.$(':selected').unselect(); });
       this.cy.on('tap', (evt) => {
+        this.nodeMenu.open = false;   // any tap closes the right-click menu
         if (evt.target === this.cy) {
           this.selected = null;
           this.neighbors = [];
           this.detail = null;
           this.selectedEdge = null;
           this.edgeDetail = null;
-          this.cy.elements().removeClass('selected neighbor dimmed facet-match');
+          this.cy.elements().removeClass('selected neighbor dimmed facet-match edge-in edge-out');
           this.clearPath();   // background click exits path mode too
           if (this.nodeSearch) this.nodeSearch = '';   // and lifts a search spotlight
         }
@@ -721,6 +974,13 @@ function graphController() {
         // Esc also lifts a search spotlight (the dimmed-graph dead-end).
         if (e.key === 'Escape' && this.cy.elements('.facet-match').length) {
           this.clearSearch();
+        }
+        // Esc clears a node spotlight (issue node-spotlight) and RECONCILES to the active
+        // facet state: highlightFacets() drops the spotlight dimming, then re-applies facet
+        // dimming only if a role/type/origin/cluster filter is still active — so the facet
+        // dropdowns and the canvas never diverge (Codex).
+        if (e.key === 'Escape' && this.cy.elements('node.dimmed').length) {
+          this.highlightFacets();
         }
       });
 
@@ -840,23 +1100,18 @@ function graphController() {
           // so highlighting a neighbor must not impersonate it.
           'underlay-color': '#0F766E', 'underlay-opacity': 0.28, 'underlay-padding': 6,
         }},
-        { selector: 'node.provisional', style: {
-          // Live "discovered" node, not yet landed. Light teal so it reads as fresh/
-          // tentative (not background) — deliberately NOT dashed/dotted (those mean
-          // osint/manual origin). Goes solid via reload() if it actually lands.
-          'opacity': 0.9,
-          'background-color': '#5EEAD4',
-          'border-width': 2,
-          'border-color': '#0F766E',
-          'border-style': 'solid',
-          'color': '#0F766E',
-          'font-style': 'italic',
-        }},
         { selector: 'node.dimmed', style: { 'opacity': 0.15 }},
         { selector: 'node.facet-match', style: {
           // Facet highlight: an amber halo + bold label so matches pop against the dimmed rest.
           'underlay-color': '#B45309', 'underlay-opacity': 0.30, 'underlay-padding': 7,
           'font-weight': 'bold', 'z-index': 900,
+        }},
+        { selector: 'node.in-set', style: {
+          // Persistent multi-select ring (PRD-08 Req 1): a purple "evidence set" halo,
+          // distinct from the teal single-select border, so a set member stays visibly
+          // marked across taps until the set is cleared.
+          'underlay-color': '#7E22CE', 'underlay-opacity': 0.30, 'underlay-padding': 7,
+          'border-width': 3, 'border-color': '#7E22CE', 'z-index': 910,
         }},
         { selector: 'edge', style: {
           'curve-style': 'bezier',
@@ -900,24 +1155,18 @@ function graphController() {
           'line-color': '#0F766E', 'target-arrow-color': '#0F766E',
           'width': 3.5, 'opacity': 1, 'z-index': 999,
         }},
-        { selector: 'edge.dimmed', style: { 'opacity': 0.1 }},
-        // Provisional LAST so it wins over the base `edge` rules above (cytoscape applies
-        // matching selectors in array order, later overrides earlier). A clean thin teal
-        // link from the looked-up entity to what it surfaced — not the fat gray default.
-        { selector: 'edge.provisional', style: {
-          'line-color': '#2DD4BF',
-          'line-style': 'dashed',
-          'width': 2,
-          'opacity': 0.8,
-          'curve-style': 'bezier',
-          'target-arrow-shape': 'triangle',
-          'target-arrow-color': '#2DD4BF',
-          'arrow-scale': 0.6,
-          'label': '',
+        // PRD-08 Req 3: directional tint on the selected node's own edges — outgoing
+        // (orange) vs incoming (blue) so "in vs out" is legible without dimming the graph.
+        { selector: 'edge.edge-out', style: {
+          'line-color': '#C2410C', 'target-arrow-color': '#C2410C', 'width': 3, 'opacity': 1, 'z-index': 950,
         }},
+        { selector: 'edge.edge-in', style: {
+          'line-color': '#2563EB', 'target-arrow-color': '#2563EB', 'width': 3, 'opacity': 1, 'z-index': 950,
+        }},
+        { selector: 'edge.dimmed', style: { 'opacity': 0.1 }},
         // Shortest-path mode (issue graph-pathfinding): LAST so the found path
-        // wins on every shared element, including provisional edges (cytoscape
-        // applies later matching selectors over earlier ones).
+        // wins on every shared element (cytoscape applies later matching
+        // selectors over earlier ones).
         { selector: '.path-dim', style: { 'opacity': 0.12 }},
         { selector: 'node.path-highlight', style: {
           'border-width': 3, 'border-color': '#0F766E', 'opacity': 1, 'z-index': 998,
@@ -976,6 +1225,7 @@ function graphController() {
         // label so long URLs don't sprawl across the graph.
         if (!n.data.full_name) n.data.full_name = n.data.label || '';
         n.data.label = this.shortLabel(n.data.full_name);
+        if (!n.data.thumbnail) n.data.thumbnail = this._faviconFor(n.data);  // domain/url favicon face
         if (!n.data.thumbnail) delete n.data.thumbnail;  // only set when real → node[thumbnail] matches
       }
       for (const e of data.edges) {
@@ -1001,13 +1251,14 @@ function graphController() {
       this._buildCollections();
 
       this.nodeCount = data.nodes.length;
+      this.faceCount = this.cy.nodes('[thumbnail]').length;   // nodes carrying a face (issue node-faces-counter)
       this.edgeCount = data.edges.length;
       this.loaded = true;
 
       if (this.nodeCount > 0) {
         // Rebuild honors the analyst's layout pick; cose keeps its stretched-out
         // tuning (founder: spread it) so dense networks stay legible.
-        const opts = this.layoutName === 'cose'
+        const opts = (this.layoutName === 'cose' || this.layoutName === 'fcose')
           ? Object.assign(this._layoutOpts(),
                           { idealEdgeLength: 150, nodeRepulsion: 16000, gravity: 0.25 })
           : this._layoutOpts();
@@ -1152,10 +1403,15 @@ function graphController() {
     },
 
     // ONE source of layout options for every call site (issue graph-layouts).
-    // cose stays the default; dagre = hierarchy, concentric = ego rings around
-    // the selected node (falls back to the highest-degree node), circle = circle.
+    // cose stays the default; fcose = continuous physics, dagre = hierarchy,
+    // concentric = ego rings around the selected node (falls back to the
+    // highest-degree node), circle = circle.
     _layoutOpts() {
       const base = { animate: 'end', animationDuration: 600, fit: true, padding: 50 };
+      if (this.layoutName === 'fcose' && this.fcoseOk)
+        return { name: 'fcose', quality: 'default', randomize: true,
+                 idealEdgeLength: 110, nodeRepulsion: 8000,
+                 nodeDimensionsIncludeLabels: true, ...base };
       if (this.layoutName === 'dagre' && this.dagreOk)
         return { name: 'dagre', rankDir: 'TB', nodeSep: 40, rankSep: 90, ...base };
       if (this.layoutName === 'concentric') {
@@ -1210,6 +1466,20 @@ function graphController() {
       this.panelOpen = open;
       setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
     },
+
+    // Open the whole-case assessment overlay (assessment-dossier-promotion): fetch the brief,
+    // then show it. ONE right overlay at a time — hide the node drawer (keep `selected` so it
+    // reopens on the next node tap). Decoupled: its own state, never touches digOrder/chat.
+    async openAssessment() {
+      this.setPanel(false);            // keep the right edge singular (no z/focus fight)
+      try {
+        this.assessment = await fetch('/api/assessment').then(r => r.json());
+      } catch (e) {
+        this.assessment = { has_brief: false, markdown: '', stale: null };
+      }
+      this.assessmentOpen = true;
+    },
+    closeAssessment() { this.assessmentOpen = false; },
 
     // --- Collection nodes for high-fanout neighborhoods (issue graph-collection-nodes) ---
     // A crt.sh sweep that lands 200 subdomains must not flood the canvas: leaf
@@ -1274,14 +1544,14 @@ function graphController() {
 
     applyStyleRules() {
       // Rebuild the stylesheet: base rules, then the enabled custom rules, then
-      // the mode styles (selection/provisional/path) so interactions still win.
+      // the mode styles (selection/path) so interactions still win.
       // Each rule applies in isolation — one bad selector is skipped + flagged,
       // never allowed to blank the canvas (issue graph-style-validation).
       const base = this.style();
       // Custom rules slot in AFTER every base type/data style but BEFORE every
-      // interaction style (selection / neighbor / dim / facet / provisional /
-      // path — all class-based selectors), so an analyst rule can restyle the
-      // graph but never override what the UI is actively highlighting.
+      // interaction style (selection / neighbor / dim / facet / path — all
+      // class-based selectors), so an analyst rule can restyle the graph but
+      // never override what the UI is actively highlighting.
       const isInteraction = (s) => /\.[A-Za-z]/.test(s.selector);
       const head = base.filter(s => !isInteraction(s));
       const tail = base.filter(isInteraction);
@@ -1414,16 +1684,33 @@ function graphController() {
         // The children were folded BEFORE the initial layout ran, so they have
         // no spread positions — relax them apart instead of leaving a stack.
         this._spreadAndFit();
+        // Expanding restores hidden nodes/faces to the canvas — refresh the counts so the
+        // header (incl. faces) isn't stale (issue node-faces-counter, Codex).
+        this.nodeCount = this.cy.nodes('[!isCollection]').length;
+        this.edgeCount = this.cy.edges().length;
+        this.faceCount = this.cy.nodes('[thumbnail]').length;
         return;
       }
       if (node.data('isCollection')) return;   // expanded group shell — not an entity
+      this.assessmentOpen = false;   // one right overlay at a time: a node tap supersedes the assessment (codex)
+      // A node tap also supersedes an open EDGE drawer: the node drawer's x-show
+      // requires !selectedEdge, so without clearing it the node panel — and the
+      // action verbs that now live ONLY there — stay hidden after tapping a node
+      // while an edge is selected (issue graph-single-action-surface, codex adversarial).
+      this.selectedEdge = null; this.edgeDetail = null;
       this.panelOpen = true;   // a tap always opens the panel (even if popped out)
       setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
-      this.cy.elements().removeClass('selected neighbor dimmed');
+      // Single click selects JUST this node — no neighbor-highlight, no dimming the rest
+      // (founder: "I can't click on one node, it always connects it to multiple" + "I want
+      // to see all the nodes"). The node's own edges light up so you see what it links to,
+      // but the rest of the graph stays fully visible. Its connections are in the panel;
+      // Expand / the in-out buttons reveal the neighborhood on demand.
+      this.cy.elements().removeClass('selected neighbor dimmed edge-in edge-out');
       node.addClass('selected');
-      const nbrs = node.neighborhood('node');
-      nbrs.addClass('neighbor');
-      this.cy.elements().difference(node.union(nbrs).union(node.connectedEdges())).addClass('dimmed');
+      // PRD-08 Req 3: tint this node's own edges by direction (out=orange, in=blue)
+      // so in vs out is legible — no neighbor-node highlight, no dimming (founder pref).
+      node.outgoers('edge').addClass('edge-out');
+      node.incomers('edge').addClass('edge-in');
       this.selected = node.data();
       // Remember what the analyst clicked through (client-side, no round-trip): the
       // next chat message ships this trail so the agent has the viewed-node context.
@@ -1432,14 +1719,11 @@ function graphController() {
         this.selectionTrail.push(sname);
         if (this.selectionTrail.length > 8) this.selectionTrail.shift();
       }
-      this.enrichResults = [];
-      this.enrichError = '';
-      this.pastRuns = [];
-      this.activeRunId = null;
-      this.pickProviderFor(this.selected.type);
-      this.loadHistory(node.id());
+      // Quick-peek only — the heavy investigation (transforms / results / past lookups) lives
+      // in per-node dig cards (issue persistent-dig-cards), opened via Investigate, and is
+      // NEVER cleared by selecting another node.
       this.detail = null; this.inCount = 0; this.outCount = 0;
-      this.loadDetail(node.id());   // node details render in the side panel (x-show=selected)
+      this.loadDetail(node.id());   // node details render in the quick-peek (x-show=selected)
     },
 
     async onEdgeTap(edge) {
@@ -1447,10 +1731,11 @@ function graphController() {
       // state would clobber the path classes (issue graph-pathfinding).
       if (this.pathMode) return;
       // Edge side panel: what the edge means + why it was created.
+      this.assessmentOpen = false;   // one right overlay at a time: an edge tap supersedes the assessment (codex)
       this.panelOpen = true;
       setTimeout(() => { if (this.cy) this.cy.resize(); }, 200);
       this.selected = null; this.detail = null;
-      this.cy.elements().removeClass('selected neighbor dimmed');
+      this.cy.elements().removeClass('selected neighbor dimmed edge-in edge-out');
       edge.addClass('selected');
       edge.connectedNodes().addClass('neighbor');
       this.selectedEdge = edge.data();
@@ -1488,22 +1773,74 @@ function graphController() {
         // Accurate uncapped counts from the server (the rendered list is sliced to 80).
         this.inCount = d.in_degree ?? (d.connections || []).filter(c => c.dir === 'in').length;
         this.outCount = d.out_degree ?? (d.connections || []).filter(c => c.dir === 'out').length;
-        // Type-scope the Enrich dropdown to the transforms valid for THIS node's type
-        // (Maltego-style: right action on the right node).
-        this.loadProvidersForType(d.surface_type || d.type);
       } catch (e) {}
     },
 
-    async loadProvidersForType(entityType) {
+    // --- per-node dig cards (issue persistent-dig-cards) ---------------------------------
+    // Open (or un-collapse) the dig for a node: its own investigation state that survives
+    // switching nodes. Opened from the quick-peek's Investigate button or a node run.
+    openDig(nodeData) {
+      const id = String(nodeData.id);
+      if (!this.digs[id]) {
+        this.digs[id] = {
+          id, name: nodeData.full_name || nodeData.label || id,
+          type: nodeData.surface_type || nodeData.type || '',
+          collapsed: false, providers: [], providerGroups: [], enrichProvider: '', enrichBusy: false,
+          enrichError: '', enrichResults: [], pastRuns: [], activeRunId: null,
+          invMsg: '', progress: null, _transformReq: 0,
+        };
+        this.digOrder.unshift(id);
+        this.loadProvidersForDig(id);
+        this.loadHistory(id);
+      } else {
+        this.digs[id].collapsed = false;
+      }
+      this.panelOpen = true;
+    },
+    closeDig(id) {
+      id = String(id);
+      if (this.digs[id]) delete this.digs[id];
+      this.digOrder = this.digOrder.filter(x => x !== id);
+    },
+    // A SET run (expand/investigate over the multi-select) owns a synthetic rail card so its
+    // per-node progress chips render exactly like a single-node dig. Without an owning dig the
+    // set run (the founder's 0/7 case) had no card and the chips never showed (codex finding-3).
+    // _setRun marks it so the template hides the single-node Transforms/enrich sections.
+    openSetRunDig(count) {
+      const id = '__setrun__';
+      this.digs[id] = {
+        id, name: 'Selected set (' + count + ')', type: '', collapsed: false,
+        providers: [], providerGroups: [], enrichProvider: '', enrichBusy: false, enrichError: '',
+        enrichResults: [], pastRuns: [], activeRunId: null, invMsg: '',
+        progress: null, _transformReq: 0, _setRun: true,
+      };
+      if (!this.digOrder.includes(id)) this.digOrder.unshift(id);
+      this.runDigId = id;
+      this.panelOpen = true;
+      return id;
+    },
+    transformConfigured(dig) {
+      // Run only when the SELECTED entry is configured (a stale pick could be disabled).
+      const p = (dig.providers || []).find(
+        x => (x.slug + '|' + (x.mode || '')) === dig.enrichProvider);
+      return !!(p && p.configured);
+    },
+    async loadProvidersForDig(id) {
+      const dig = this.digs[id]; if (!dig) return;
+      // Per-dig request token: a SLOW response must not overwrite a newer load.
+      const req = (dig._transformReq = (dig._transformReq || 0) + 1);
       try {
-        const url = entityType ? ('/api/enrich/providers?type=' + encodeURIComponent(entityType))
-                               : '/api/enrich/providers';
-        const data = await fetch(url).then(r => r.json());
-        this.providers = (data.providers || []).sort((a, b) => (b.configured) - (a.configured));
-        // Keep the current pick if still valid, else default to the first ready provider.
-        if (!this.providers.find(p => p.slug === this.enrichProvider)) {
-          const firstReady = this.providers.find(p => p.configured);
-          this.enrichProvider = firstReady ? firstReady.slug : (this.providers[0]?.slug || '');
+        // entity_id (numeric node ids only) lets the menu flag already-run transforms.
+        const eid = /^\d+$/.test(String(dig.id || '')) ? '&entity_id=' + encodeURIComponent(dig.id) : '';
+        const data = await fetch('/api/transforms?type=' + encodeURIComponent(dig.type || '') + eid)
+          .then(r => r.json());
+        if (!this.digs[id] || req !== this.digs[id]._transformReq) return;
+        dig.providers = data.transforms || [];
+        dig.providerGroups = data.groups || [];
+        const key = (p) => p.slug + '|' + (p.mode || '');
+        if (!dig.providers.find(p => key(p) === dig.enrichProvider)) {
+          const firstReady = dig.providers.find(p => p.configured);
+          dig.enrichProvider = firstReady ? key(firstReady) : '';
         }
       } catch (e) {}
     },
@@ -1530,7 +1867,7 @@ function graphController() {
       const add = (id, name) => {
         if (!name || this.selectedSet.some(s => String(s.id) === String(id))) return;
         this.selectedSet.push({ id, name });
-        const n = this.cy.getElementById(String(id)); if (n.length) n.addClass('selected');
+        const n = this.cy.getElementById(String(id)); if (n.length) n.addClass('in-set');
       };
       add(this.selected.id, this.selected.full_name);
       (this.detail?.connections || [])
@@ -1539,9 +1876,53 @@ function graphController() {
     },
     clearSelection() {
       this.selectedSet.forEach(s => {
-        const n = this.cy.getElementById(String(s.id)); if (n.length) n.removeClass('selected');
+        const n = this.cy.getElementById(String(s.id)); if (n.length) n.removeClass('in-set');
       });
       this.selectedSet = []; this.invMsg = '';
+    },
+    // shift/⌘-click toggle: accumulate or drop a node from the visible set
+    // (direct manipulation, PRD-08 Req 1). The .in-set ring persists across taps.
+    toggleInSet(node) {
+      const id = node.id();
+      const name = node.data('full_name') || node.data('label') || id;
+      if (String(name).startsWith('grp-') || node.data('isCollection')) return;
+      const i = this.selectedSet.findIndex(s => String(s.id) === String(id));
+      if (i >= 0) { this.selectedSet.splice(i, 1); node.removeClass('in-set'); }
+      else { this.selectedSet.push({ id, name }); node.addClass('in-set'); }
+    },
+    // Stop a running Expand / Deep-investigate; the status poll then settles the
+    // panel to "stopped — kept what was found" (backend interrupt is fast, one-hop I3).
+    async stopInvestigate() {
+      this.invMsg = 'stopping…';
+      try { await fetch('/api/investigate/stop', { method: 'POST' }); } catch (e) {}
+    },
+    // Maltego "select a bunch → a list I can copy/review": copy the selected node names
+    // (one per line) to the clipboard. The set is fed by box-select + the +connections buttons.
+    copySelection() {
+      const text = this.selectedSet.map(s => s.name).join('\n');
+      if (navigator.clipboard) navigator.clipboard.writeText(text);
+      this.copiedSet = true;
+      setTimeout(() => { this.copiedSet = false; }, 1500);
+    },
+    // "What is this?" — a plain-English read of the selected cluster, dropped into the chat.
+    async explainCluster() {
+      if (this.explainBusy || !this.selectedSet.length) return;
+      this.explainBusy = true;
+      const names = this.selectedSet.map(s => s.name);
+      if (window.__kipiChat) window.__kipiChat.pushAside('reading the ' + names.length + '-node cluster…');
+      try {
+        const r = await fetch('/api/cluster/explain', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ names })
+        }).then(x => x.json());
+        const text = r.error ? ('Could not read the cluster: ' + r.error)
+                             : ('**What is this cluster?**\n\n' + (r.answer || ''));
+        if (window.__kipiChat) window.__kipiChat.pushAgent(text);
+        else alert(text.replace(/\*\*/g, ''));
+      } catch (e) {
+        if (window.__kipiChat) window.__kipiChat.pushAgent('Could not read the cluster.');
+      }
+      this.explainBusy = false;
     },
     // PRD-05: "this is wrong" on a connection → reject the backing claim. The claims
     // spine retires the derived edge (cascade) and reprojects; we reload to reflect it.
@@ -1555,24 +1936,56 @@ function graphController() {
         this.reload();                                         // refresh the canvas
       } catch (e) {}
     },
+    // Maltego EXPAND: pull this node's infra connections one hop (deterministic, no AI
+    // brief, no whole-case synthesis), then refresh the graph in place — fast + cheap.
+    async expandNode() {
+      if (!this.selected || this.invBusy) return;
+      this.openDig(this.selected); this.runDigId = String(this.selected.id);
+      this.invBusy = true; this.invMsg = 'expanding…';
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity: this.selected.full_name, expand: true }),
+        }).then(r => r.json());
+        if (d.error) { this.invMsg = d.error; this.invBusy = false; this.runDigId = null; return; }
+        this.watchRunThenRefresh();
+      } catch (e) { this.invMsg = 'Could not start.'; this.invBusy = false; this.runDigId = null; }
+    },
     // Run the full investigator agent on THIS single node. Watch it live, then refresh
     // the graph IN PLACE when it finishes — so the new nodes/edges appear right here,
     // not on another page (the run trail is still on /runs for detail).
     async investigateThisNode() {
       if (!this.selected || this.invBusy) return;
+      this.openDig(this.selected); this.runDigId = String(this.selected.id);
       this.invBusy = true; this.invMsg = 'starting…';
       try {
         const d = await fetch('/api/investigate', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ entity: this.selected.full_name }),
         }).then(r => r.json());
+        if (d.error) { this.invMsg = d.error; this.invBusy = false; this.runDigId = null; return; }
+        this.watchRunThenRefresh();
+      } catch (e) { this.invMsg = 'Could not start.'; this.invBusy = false; this.runDigId = null; }
+    },
+    // Run the full investigator agent on the selected set, then refresh in place.
+    // One-hop EXPAND of the selected SET (Maltego): each selected node opens exactly one
+    // hop beyond it, deterministic, no multi-hop chase. The analyst drives the next hop.
+    async expandSelected() {
+      if (!this.selectedSet.length || this.invBusy) return;
+      this.openSetRunDig(this.selectedSet.length);   // a set run owns a synthetic rail card
+      this.invBusy = true; this.invMsg = 'expanding…';
+      try {
+        const d = await fetch('/api/investigate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entities: this.selectedSet.map(s => s.name), expand: true }),
+        }).then(r => r.json());
         if (d.error) { this.invMsg = d.error; this.invBusy = false; return; }
         this.watchRunThenRefresh();
       } catch (e) { this.invMsg = 'Could not start.'; this.invBusy = false; }
     },
-    // Run the full investigator agent on the selected set, then refresh in place.
     async investigateSelected() {
       if (!this.selectedSet.length || this.invBusy) return;
+      this.openSetRunDig(this.selectedSet.length);   // a set run owns a synthetic rail card
       this.invBusy = true; this.invMsg = 'starting…';
       try {
         const d = await fetch('/api/investigate', {
@@ -1588,6 +2001,10 @@ function graphController() {
     // so the freshly-promoted nodes/edges show up here without a manual refresh.
     watchRunThenRefresh() {
       if (this.invTimer) return;
+      // 1s clock so the dig card's elapsed reads smoothly (the status poll is 2s); stops at
+      // run end below, freezing elapsed at its final value.
+      this.clockNow = Date.now() / 1000;
+      if (!this.clockTimer) this.clockTimer = setInterval(() => { this.clockNow = Date.now() / 1000; }, 1000);
       this.invTimer = setInterval(async () => {
         let s;
         try { s = await fetch('/api/investigate/status').then(r => r.json()); }
@@ -1597,22 +2014,85 @@ function graphController() {
           this.invMsg = p.targets_total
             ? (p.targets_done + '/' + p.targets_total + ' targets · ' + p.findings + ' findings')
             : ((p.phase || 'investigating') + '… ' + (p.findings || 0) + ' findings');
+          // Run-ownership: the dig that launched the run owns the full per-node snapshot
+          // (targets[], started_at, eta_s) the card renders — not just the compact string.
+          if (this.runDigId && this.digs[this.runDigId]) this.digs[this.runDigId].progress = p;
         }
+        if (this.runDigId && this.digs[this.runDigId]) this.digs[this.runDigId].invMsg = this.invMsg;
         if (s.status === 'running') return;
         clearInterval(this.invTimer); this.invTimer = null;
+        if (this.clockTimer) { clearInterval(this.clockTimer); this.clockTimer = null; }
+        // Freeze elapsed on the owning dig BEFORE clockNow can be restarted by a later run,
+        // so this finished card's clock stops at its real total (codex finding-2).
+        const _own = this.runDigId;
+        if (_own && this.digs[_own] && this.digs[_own].progress && this.digs[_own].progress.started_at) {
+          this.digs[_own].progress.elapsed_s_final =
+            Math.max(0, Math.round(this.clockNow - this.digs[_own].progress.started_at));
+        }
         this.invBusy = false;
         // A no-work run did nothing — say so LOUD and keep the message up; don't pretend
         // it succeeded. Stopped keeps what landed. Otherwise refresh in place.
         if (s.status === 'no_work') {
           this.invMsg = (s.result && s.result.note) || 'the agent ran no tools — check OSINT/MCP setup';
+          const _nw = this.runDigId; this.runDigId = null;   // release run ownership
+          if (_nw && this.digs[_nw]) this.digs[_nw].invMsg = this.invMsg;
           return;  // nothing landed, no graph change to pull in
         }
         this.invMsg = s.status === 'stopped' ? 'stopped — kept what was found'
                                              : 'done — updating the graph…';
-        await this.reload();
-        if (this.selected) this.loadDetail(this.selected.id);  // refresh the open panel too
-        setTimeout(() => { this.invMsg = ''; this.clearSelection(); }, 2500);
+        // The agent's suggested NEXT hop (one-hop expand co-pilot) — persist it so the
+        // analyst sees what to expand next; don't clear it with invMsg.
+        this.nextHop = (s.result && s.result.next_hop) || '';
+        await this.growGraph();   // grow in place at run completion — no wipe/relayout/fit
+        const _rd = this.runDigId; this.runDigId = null;
+        if (_rd && this.digs[_rd]) this.digs[_rd].invMsg = this.invMsg;
+        if (this.selected) this.loadDetail(this.selected.id);  // refresh the quick-peek too
+        setTimeout(() => { this.invMsg = ''; if (_rd && this.digs[_rd]) this.digs[_rd].invMsg = ''; }, 2500);
       }, 2000);
+    },
+
+    // --- run-card progress helpers (run-progress-semantics) ---------------------
+    // A run is "live" while its phase is still investigating/planning; once done/stopped/
+    // error the chips settle and the ETA hides. Reads clockNow so Alpine re-renders each tick.
+    runIsLive(dig) {
+      const ph = dig && dig.progress && dig.progress.phase;
+      return ph === 'investigating' || ph === 'planning' || ph === 'starting' || ph === 'extracting';
+    },
+    // mm:ss elapsed off the run's started_at (epoch s). While the run is live, it ticks off
+    // the global clockNow; once it settles, it reads the per-dig elapsed_s_final snapshot so a
+    // LATER run's clock can't inflate this finished card (codex finding-2).
+    runElapsed(dig) {
+      const p = dig && dig.progress;
+      if (!p || !p.started_at) return '';
+      let secs;
+      if (!this.runIsLive(dig) && p.elapsed_s_final != null) {
+        secs = p.elapsed_s_final;            // frozen at run end
+      } else if (this.clockNow) {
+        secs = Math.max(0, Math.round(this.clockNow - p.started_at));  // live
+      } else {
+        return '';
+      }
+      const m = Math.floor(secs / 60), s = secs % 60;
+      return m + ':' + String(s).padStart(2, '0');
+    },
+    // "~1m left" / "~40s left" from the historical ETA; '' when null (cold-start) or done.
+    runEta(dig) {
+      const eta = dig && dig.progress && dig.progress.eta_s;
+      if (eta == null || !this.runIsLive(dig)) return '';
+      if (eta <= 0) return 'wrapping up…';
+      return eta >= 60 ? '~' + Math.round(eta / 60) + 'm left' : '~' + eta + 's left';
+    },
+    // The chip label/glyph for one per-target record. "running" never reads "0 findings";
+    // a finished zero-result target reads a neutral "none", never a mid-run verdict.
+    targetChip(t) {
+      if (t.state === 'queued') return '⏳ ' + t.name;
+      if (t.state === 'running') return '⟳ ' + t.name;
+      return (t.findings > 0 ? '✓ ' : '○ ') + t.name + (t.findings > 0 ? ' · ' + t.findings : ' · none');
+    },
+    targetChipClass(t) {
+      if (t.state === 'queued') return 'border-bg-border text-ink-faint';
+      if (t.state === 'running') return 'border-accent text-accent bg-accent/10';
+      return t.findings > 0 ? 'border-accent/40 text-ink' : 'border-bg-border text-ink-faint';
     },
 
     // Filter the CURRENT graph to one cluster (deep-state, then reload).
@@ -1622,8 +2102,35 @@ function graphController() {
       this.reload();
     },
     // Open a fresh graph focused on a cluster / a node, in a new tab.
-    openClusterNewGraph(clusterId) { window.open('/graph?cluster_id=' + clusterId, '_blank'); },
-    openNodeNewGraph(id) { window.open('/graph?focus=' + id, '_blank'); },
+    openClusterNewGraph(clusterId) { window.kipiNav.openGraph('cluster_id=' + clusterId); },
+    openNodeNewGraph(id) { window.kipiNav.openGraph('focus=' + id); },
+    // Right-click menu: select the node (so the existing actions target it) and place the
+    // menu at the cursor (issue node-right-click-menu).
+    openNodeMenu(evt) {
+      this.nodeMenu.open = false;   // an ignored right-click must not leave a stale menu open
+      const node = evt.target;
+      if (this.pathMode || node.data('isCollection') ||
+          node.hasClass('cy-expand-collapse-collapsed-node')) return;
+      this.onNodeTap(node);
+      const oe = evt.originalEvent || {};
+      // Clamp to the viewport so the menu never renders off the right/bottom edge.
+      const MW = 232, MH = 240;
+      const x = Math.max(8, Math.min(oe.clientX || 120, window.innerWidth - MW));
+      const y = Math.max(8, Math.min(oe.clientY || 120, window.innerHeight - MH));
+      this.nodeMenu = { open: true, x, y };
+    },
+    // Opt-in focus (issue node-spotlight): dim the whole graph except this node's web. NEVER
+    // auto on tap (founder: "I want to see all the nodes") — only from the right-click menu.
+    // Clears on a background canvas tap (existing handler) or Escape.
+    spotlightNode(id) {
+      const n = this.cy.getElementById(String(id));
+      if (!n.length) return;
+      this.cy.elements().removeClass('facet-match');   // clear any stale facet/search highlight
+      if (this.nodeSearch) this.nodeSearch = '';
+      this.cy.elements().addClass('dimmed');           // fade the whole graph
+      n.closedNeighborhood().removeClass('dimmed');    // node + neighbors + connecting edges
+      n.connectedEdges().removeClass('dimmed');        // belt: light up its edges
+    },
 
     // Shorten a node label for the canvas the way graph tools do: drop the scheme, keep
     // the host + a little path, ellipsize anything long. The full value is preserved in
@@ -1635,12 +2142,36 @@ function graphController() {
       return s;
     },
 
+    // Favicon node face for domain/url infra nodes (issue node-favicons). Founder OPSEC
+    // decision (2026-06-12): Google s2/favicons. Other types or a bad/dotless host → ''.
+    _faviconFor(d) {
+      const t = (d && d.type) || '', st = (d && d.surface_type) || '';
+      // Check BOTH type and surface_type — a case-specific type (e.g. scam_domain) keeps
+      // the raw classification in surface_type (Codex finding).
+      if (t !== 'domain' && t !== 'url' && st !== 'domain' && st !== 'url') return '';
+      const raw = String((d && (d.full_name || d.label)) || '').trim();
+      if (/[^\x00-\x7F]/.test(raw)) return '';   // non-ASCII / IDN — skip rather than mangle the host
+      const scheme = (raw.match(/^([a-z][a-z0-9+.\-]*):/i) || [])[1];
+      if (scheme && !/^https?$/i.test(scheme)) return '';   // mailto:/ftp:/etc — not a web host
+      let host = raw.toLowerCase().replace(/^[a-z][a-z0-9+.\-]*:\/\//, '');   // scheme
+      host = host.split('/')[0].split('?')[0].split('#')[0]   // path / query / hash
+                 .split('@').pop()                            // userinfo
+                 .split(':')[0];                              // port
+      host = host.replace(/^www\./, '').replace(/[^a-z0-9.\-]+$/, '');  // www + trailing junk
+      if (!host || host.indexOf('.') === -1) return '';
+      // Same-origin proxy (issue node-favicons): the kipi backend fetches Google's favicon
+      // and serves it from our origin, so cytoscape (which forces CORS) can render it.
+      return '/api/favicon?domain=' + encodeURIComponent(host);
+    },
+
     // A case change during a live run → grow the REAL graph incrementally (the server
     // lands each discovery as a real node/edge). Otherwise (filter change, manual edit)
     // → a normal full reload.
     async onCaseChanged() {
-      if (this.runActive) await this.growGraph();
-      else await this.reload();
+      // Every case-data change grows the graph IN PLACE — never a full wipe+relayout
+      // (issue graph-grow-in-place). reload() is reserved for explicit view changes
+      // (filters, layout switch, focus, the Re-layout / Fit buttons).
+      await this.growGraph();
     },
 
     // Incrementally grow the REAL graph as the dig lands nodes: fetch the case graph, add
@@ -1660,9 +2191,12 @@ function graphController() {
       catch (e) { return; }
       this.computeFacets(data.nodes);
       const shapeMap = { operator: 'ellipse', channel: 'diamond', ioc: 'octagon', infra: 'rectangle', source: 'triangle' };
-      let added = 0;
+      const liveNodeIds = new Set(data.nodes.map(n => String(n.data.id)));
+      const liveEdgeIds = new Set(data.edges.map(e => String(e.data.id)));
+      // 1) Decorate every node; ADD new ones (placeholder pos — placed in step 3) and
+      //    UPDATE existing ones IN PLACE: same position, fresh styling (role/score retypes).
+      const newNodes = [];
       for (const n of data.nodes) {
-        if (this.cy.getElementById(String(n.data.id)).length) continue;   // already on canvas
         n.data.color = this.roleColor(n.data.role);
         n.data.clusterColor = this.clusterColor(n.data.cluster_ids);
         n.data.shape = shapeMap[n.data.role] || 'ellipse';
@@ -1670,44 +2204,116 @@ function graphController() {
                            : n.data.origin === 'manual' ? 'dotted' : 'solid';
         if (!n.data.full_name) n.data.full_name = n.data.label || '';
         n.data.label = this.shortLabel(n.data.full_name);
+        if (!n.data.thumbnail) n.data.thumbnail = this._faviconFor(n.data);  // domain/url favicon face
         if (!n.data.thumbnail) delete n.data.thumbnail;
-        this._addGrownNode(n);
-        added++;
+        const ex = this.cy.getElementById(String(n.data.id));
+        if (ex.length) { ex.data(n.data); continue; }              // update in place, keep position
+        newNodes.push(this.cy.add({ group: 'nodes', data: n.data, position: { x: 0, y: 0 } }));
       }
+      // 2) ADD new edges / UPDATE existing edge styling in place.
       for (const e of data.edges) {
-        if (this.cy.getElementById(String(e.data.id)).length) continue;
-        // Both endpoints must be on the canvas or cytoscape throws.
-        if (!this.cy.getElementById(String(e.data.source)).length ||
-            !this.cy.getElementById(String(e.data.target)).length) continue;
         e.data.color = e.data.co_occurrence ? '#A8A29E' : this.confColor(e.data.confidence);
         e.data.width = e.data.co_occurrence ? 1
                      : e.data.confidence === 'high' ? 2.5
                      : e.data.confidence === 'medium' ? 1.5 : 1;
+        const ex = this.cy.getElementById(String(e.data.id));
+        if (ex.length) { ex.data(e.data); continue; }
+        // Both endpoints must be on the canvas or cytoscape throws.
+        if (!this.cy.getElementById(String(e.data.source)).length ||
+            !this.cy.getElementById(String(e.data.target)).length) continue;
         const edge = this.cy.add({ group: 'edges', data: e.data });
         edge.style({ 'opacity': 0 });
         edge.animate({ style: { 'opacity': 1 } }, { duration: 300, easing: 'ease-out-cubic' });
       }
+      // 3) Place each NEW node at a free slot near a real neighbour (all endpoints now
+      //    exist). Obstacles snapshotted once and grown as we place, so nothing stacks.
+      if (newNodes.length) {
+        const obstacles = this._visibleObstacles();
+        for (const node of newNodes) {
+          const anchor = this._anchorFor(node.id(), data.edges);
+          const pos = this.freeSpot(anchor.x, anchor.y, 40, obstacles);
+          this._placeAndReveal(node, pos);
+          obstacles.push({ x: pos.x, y: pos.y, r: 20 });
+        }
+      }
+      // 4) RECONCILE removals: drop real (non-collection) nodes/edges gone from the live
+      //    data so retype/delete/reject changes don't leave stale state. Collection shells
+      //    and their meta-edges are synthetic — never touched here.
+      this.cy.nodes().forEach(node => {
+        if (node.data('isCollection')) return;
+        if (!liveNodeIds.has(node.id())) {
+          if (this.digs[node.id()]) this.closeDig(node.id());   // drop the gone node's dig
+          this.cy.remove(node);
+        }
+      });
+      this.cy.edges().forEach(edge => {
+        const s = edge.source(), t = edge.target();
+        if (!s.length || !t.length || s.data('isCollection') || t.data('isCollection')) return;
+        if (!liveEdgeIds.has(edge.id())) this.cy.remove(edge);
+      });
       this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
       this.edgeCount = this.cy.edges().length;
-      if (added) this._spreadAndFit(); else this._frame();
+      this.faceCount = this.cy.nodes('[thumbnail]').length;   // nodes carrying a face (issue node-faces-counter)
+      // Grow in place (issue graph-grow-in-place): new nodes placed at freeSpot near their
+      // anchor, existing nodes updated WITHOUT moving, gone nodes removed — and NO
+      // force-relaxation, NO viewport refit. Re-layout / Fit buttons remain for explicit tidy.
     },
 
-    // Add a real node in OPEN SPACE beyond the current cluster (ring at a random angle),
-    // not on the pile — so a new branch reads as "a new piece of the tree", then the
-    // force-spread settles it. Size/color come from the node's real data (score/role).
-    _addGrownNode(n) {
-      const nodes = this.cy.nodes();
-      let pos;
-      if (!nodes.length) {
-        pos = { x: 0, y: 0 };
-      } else {
-        const bb = nodes.boundingBox();
-        const cx = (bb.x1 + bb.x2) / 2, cy = (bb.y1 + bb.y2) / 2;
-        const r = Math.max(bb.w, bb.h) / 2 + 160;
-        const a = Math.random() * Math.PI * 2;
-        pos = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+    // Find a free slot for a new node by spiralling out from an anchor, taking the first
+    // ring position that clears every obstacle (ported from ride-along's freeSpot).
+    // `obstacles` is a snapshotted [{x,y,r}] array so a live burst doesn't re-scan the
+    // canvas per node (perf). Deterministic + bounded; existing nodes are never moved.
+    freeSpot(ax, ay, size, obstacles) {
+      const obs = obstacles || this._visibleObstacles();
+      const half = size / 2;
+      for (let ring = 0; ring < 14; ring++) {
+        const rad = 90 + ring * 52;
+        const steps = 8 + ring * 2;
+        for (let s = 0; s < steps; s++) {
+          const a = (2 * Math.PI * s) / steps + ring * 0.5;
+          const x = ax + rad * Math.cos(a), y = ay + rad * Math.sin(a);
+          let ok = true;
+          for (let i = 0; i < obs.length; i++) {
+            const o = obs[i], need = o.r + half + 16;
+            if ((o.x - x) * (o.x - x) + (o.y - y) * (o.y - y) < need * need) { ok = false; break; }
+          }
+          if (ok) return { x, y };
+        }
       }
-      const node = this.cy.add({ group: 'nodes', data: n.data, position: pos });
+      const rad = 90 + 14 * 52;
+      const a = (2 * Math.PI * (obs.length % 16)) / 16;
+      return { x: ax + rad * Math.cos(a), y: ay + rad * Math.sin(a) };
+    },
+
+    // Snapshot visible node centres + radii ONCE per grow batch so freeSpot() doesn't
+    // re-scan the canvas for every node it places (perf on large live bursts).
+    _visibleObstacles() {
+      return this.cy.nodes(':visible').map(n => {
+        const p = n.position();
+        return { x: p.x, y: p.y, r: n.width() / 2 };
+      });
+    },
+
+    // Anchor a new node to the position of its first on-canvas neighbour (from `edges`);
+    // fall back to the visible graph's bounding-box centre when it has none yet.
+    _anchorFor(id, edges) {
+      for (const e of (edges || [])) {
+        const ed = e.data || e;
+        if (String(ed.source) !== id && String(ed.target) !== id) continue;
+        const otherId = String(ed.source) === id ? String(ed.target) : String(ed.source);
+        const other = this.cy.getElementById(otherId);
+        if (other.length) return other.position();
+      }
+      const nodes = this.cy.nodes(':visible');
+      if (!nodes.length) return { x: 0, y: 0 };
+      const bb = nodes.boundingBox();
+      return { x: (bb.x1 + bb.x2) / 2, y: (bb.y1 + bb.y2) / 2 };
+    },
+
+    // Move a freshly-added node to its slot and fade it in. Only ever called on NEW nodes,
+    // so this never moves an existing node (issue graph-grow-in-place).
+    _placeAndReveal(node, pos) {
+      node.position(pos);
       node.style({ 'opacity': 0 });
       node.animate({ style: { 'opacity': 1 } }, { duration: 340, easing: 'ease-out-cubic' });
     },
@@ -1718,20 +2324,22 @@ function graphController() {
     _spreadAndFit() {
       if (this._spreadBusy || !this.cy.nodes().length) { this._frame(); return; }
       this._spreadBusy = true;
-      if (this.layoutName !== 'cose') {
-        // A non-force layout would be scrambled by a cose relaxation pass —
+      if (this.layoutName !== 'cose' && this.layoutName !== 'fcose') {
+        // A non-force layout would be scrambled by a force relaxation pass —
         // re-apply the analyst's chosen layout over the grown graph instead.
         this.cy.layout(Object.assign(this._layoutOpts(), {
           fit: false, stop: () => { this._spreadBusy = false; this._frame(); },
         })).run();
         return;
       }
-      this.cy.layout({
-        name: 'cose', animate: true, animationDuration: 500, randomize: false,
+      // Force layouts (cose/fcose) relax from current positions, no reshuffle.
+      // fcose's incremental mode (randomize:false) requires quality 'proof'.
+      this.cy.layout(Object.assign({
+        name: this.layoutName, animate: true, animationDuration: 500, randomize: false,
         nodeDimensionsIncludeLabels: true, idealEdgeLength: 130, nodeRepulsion: 16000,
         gravity: 0.2, numIter: 700, fit: false,
         stop: () => { this._spreadBusy = false; this._frame(); },
-      }).run();
+      }, this.layoutName === 'fcose' ? { quality: 'proof' } : {})).run();
     },
 
     // Fit to the graph, but never zoom IN past a sane level — few dots must stay dot-sized,
@@ -1749,6 +2357,7 @@ function graphController() {
     applyDeltas(d) {
       if (!d) return;
       let added = false;
+      const newDeltaNodes = [];
       (d.add_nodes || []).forEach(n => {
         if (this.cy.getElementById(n.data.id).length) return;
         n.data.color = this.roleColor(n.data.role);
@@ -1756,7 +2365,10 @@ function graphController() {
         n.data.shape = 'ellipse';
         n.data.borderStyle = n.data.origin === 'osint' ? 'dashed'
                            : n.data.origin === 'manual' ? 'dotted' : 'solid';
-        this.cy.add({ group: 'nodes', data: n.data });
+        if (!n.data.thumbnail) { const _f = this._faviconFor(n.data); if (_f) n.data.thumbnail = _f; }  // domain/url favicon
+        // Add now at a placeholder; positioned below once add_edges land, so every node
+        // anchors to a real neighbour (issue graph-grow-in-place) instead of stacking.
+        newDeltaNodes.push(this.cy.add({ group: 'nodes', data: n.data, position: { x: 0, y: 0 } }));
         added = true;
       });
       (d.add_edges || []).forEach(e => {
@@ -1768,11 +2380,23 @@ function graphController() {
         e.data.width = 1.5;
         this.cy.add({ group: 'edges', data: e.data });
       });
+      // Place each new delta node at a free slot near a real neighbour (issue
+      // graph-grow-in-place): no origin stacking, no relayout, existing nodes unmoved.
+      if (newDeltaNodes.length) {
+        const obstacles = this._visibleObstacles();
+        for (const node of newDeltaNodes) {
+          const anchor = this._anchorFor(node.id(), d.add_edges || []);
+          const pos = this.freeSpot(anchor.x, anchor.y, 40, obstacles);
+          this._placeAndReveal(node, pos);
+          obstacles.push({ x: pos.x, y: pos.y, r: 20 });
+        }
+      }
       (d.hide_ids || []).forEach(id => {
         // If we just hid the selected node, close its (now stale) panel.
         if (this.selected && String(this.selected.id) === String(id)) {
           this.selected = null; this.detail = null;
         }
+        if (this.digs[String(id)]) this.closeDig(id);   // drop the hidden node's dig (issue persistent-dig-cards)
         const n = this.cy.getElementById(String(id)); if (n.length) n.remove();
       });
       if (d.highlight_ids && d.highlight_ids.length) {
@@ -1792,26 +2416,28 @@ function graphController() {
       if (added) this._buildCollections();
       this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
       this.edgeCount = this.cy.edges().length;
-      // Incremental relayout derives from _layoutOpts (single source) and only
-      // overrides the incremental-specific fields.
-      if (added) this.cy.layout(Object.assign(this._layoutOpts(),
-        { fit: false, animationDuration: 400 },
-        this.layoutName === 'cose' ? { randomize: false } : {})).run();
+      this.faceCount = this.cy.nodes('[thumbnail]').length;   // nodes carrying a face (issue node-faces-counter)
+      // Grow in place (issue graph-grow-in-place): nodes were placed at freeSpot near
+      // their anchor, so NO incremental relayout here — existing nodes hold their
+      // positions and the view stays put. Tidy/relayout happens only on a full reload
+      // or the Re-layout button.
     },
 
-    async loadHistory(entityId) {
+    async loadHistory(id) {
+      const dig = this.digs[id]; if (!dig) return;
       // Past lookups for this node — browse cached results without re-running.
       try {
-        const d = await fetch('/api/enrich/history?entity_id=' + entityId + '&limit=25').then(r => r.json());
-        this.pastRuns = (d.runs || []).filter(r => r.status === 'success' && (r.results || []).length);
-      } catch (e) { this.pastRuns = []; }
+        const d = await fetch('/api/enrich/history?entity_id=' + id + '&limit=25').then(r => r.json());
+        if (this.digs[id]) dig.pastRuns = (d.runs || []).filter(r => r.status === 'success' && (r.results || []).length);
+      } catch (e) { if (this.digs[id]) dig.pastRuns = []; }
     },
 
-    viewRun(run) {
-      // Show a past run's cached results — no new search.
-      this.activeRunId = run.id;
-      this.enrichError = '';
-      this.enrichResults = (run.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
+    viewRun(id, run) {
+      // Show a past run's cached results in this dig — no new search.
+      const dig = this.digs[id]; if (!dig) return;
+      dig.activeRunId = run.id;
+      dig.enrichError = '';
+      dig.enrichResults = (run.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
     },
 
     prettyJson(s) {
@@ -1820,41 +2446,45 @@ function graphController() {
       catch (e) { return String(s).slice(0, 4000); }
     },
 
-    async runEnrich() {
-      if (!this.selected || !this.enrichProvider) return;
-      this.enrichBusy = true; this.enrichError = ''; this.enrichResults = [];
+    async runEnrich(id) {
+      const dig = this.digs[id]; if (!dig || !dig.enrichProvider) return;
+      // Slugs are registry-controlled [a-z0-9_]+ identifiers (pinned by
+      // test_typed_transforms.test_slug_charset), so '|' is unambiguous.
+      const [slug, mode] = dig.enrichProvider.split('|');
+      dig.enrichBusy = true; dig.enrichError = ''; dig.enrichResults = [];
       try {
         const run = await fetch('/api/enrich/run', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            provider: this.enrichProvider, query: this.selected.full_name,
-            entity_id: parseInt(this.selected.id), investigation: ACTIVE_CASE || null,
+            provider: slug, mode: mode || null, query: dig.name,
+            entity_id: parseInt(id), investigation: ACTIVE_CASE || null,
           }),
         }).then(r => r.json());
         if (run.error || run.status === 'error') {
-          this.enrichError = run.error || 'enrichment failed'; return;
+          dig.enrichError = run.error || 'enrichment failed'; return;
         }
         const detail = await fetch('/api/enrich/run/' + run.run_id).then(r => r.json());
-        this.enrichResults = (detail.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
-        this.activeRunId = run.run_id;
-        if (!this.enrichResults.length) this.enrichError = 'No results returned.';
-        this.loadHistory(this.selected.id);   // new run joins the browsable history
+        dig.enrichResults = (detail.results || []).map(x => ({ ...x, _open: false, promoted: !!x.extracted_entity_id }));
+        dig.activeRunId = run.run_id;
+        if (!dig.enrichResults.length) dig.enrichError = 'No results returned.';
+        this.loadHistory(id);   // new run joins this dig's browsable history
+        this.loadProvidersForDig(id);  // refresh the menu's ✓ run-state for the just-run provider
       } catch (e) {
-        this.enrichError = 'Could not reach the server.';
+        dig.enrichError = 'Could not reach the server.';
       } finally {
-        this.enrichBusy = false;
+        dig.enrichBusy = false;
       }
     },
 
-    async promote(res) {
+    async promote(dig, res) {
       try {
         const out = await fetch('/api/enrich/result/' + res.id + '/promote', { method: 'POST' })
           .then(r => r.json());
-        if (out.error) { this.enrichError = out.error; return; }
+        if (out.error) { dig.enrichError = out.error; return; }
         res.promoted = true;
         this.addNodeToCanvas(out, 'enriched');
       } catch (e) {
-        this.enrichError = 'Promote failed.';
+        dig.enrichError = 'Promote failed.';
       }
     },
 
@@ -1894,6 +2524,7 @@ function graphController() {
           borderStyle: relType === 'enriched' ? 'dashed' : 'dotted',
         };
         if (out.thumbnail) data.thumbnail = out.thumbnail;
+        if (!data.thumbnail) { const _f = this._faviconFor(data); if (_f) data.thumbnail = _f; }  // domain/url favicon
         this.cy.add({ group: 'nodes', data, position: { x: pos.x + 90, y: pos.y + 70 } });
       }
       if (srcEl && srcEl.length) {
@@ -1907,23 +2538,13 @@ function graphController() {
       }
       this.nodeCount = this.cy.nodes('[!isCollection]').length;  // shells aren't entities
       this.edgeCount = this.cy.edges().length;
+      this.faceCount = this.cy.nodes('[thumbnail]').length;   // nodes carrying a face (issue node-faces-counter)
       const node = this.cy.getElementById(nid);
       this.cy.animate({ center: { eles: node }, zoom: 1.3 }, { duration: 450 });
       node.addClass('neighbor');
       setTimeout(() => node.removeClass('neighbor'), 1800);
     },
 
-    pickProviderFor(t) {
-      // Nudge to a provider that returns useful data for this node's type.
-      t = (t || '').toLowerCase();
-      const prefer = t === 'ip' ? ['infra', 'virustotal']
-        : t.includes('domain') ? ['crtsh', 'infra', 'virustotal']
-        : (t === 'url' || t.includes('telegram')) ? ['jina', 'virustotal']
-        : (t === 'email' || t.includes('hash')) ? ['virustotal'] : [];
-      for (const p of prefer) {
-        if (this.providers.find(x => x.slug === p && x.configured)) { this.enrichProvider = p; return; }
-      }
-    },
   }
 }
 </script>

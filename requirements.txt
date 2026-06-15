@@ -25,6 +25,13 @@ openpyxl>=3.1,<4
 dnspython>=2.6,<3
 networkx>=3.4,<4
 python-louvain==0.16
+phonenumbers>=8.13,<9       # offline phone region/carrier/line-type (PRD-5 phone adapter)
+holehe>=1.61,<2             # email -> site-registration enum (PRD-6 email holehe mode)
+httpx>=0.27,<1              # async client used by the holehe scan seam (PRD-6)
+dnstwist>=20240924         # lookalike-domain candidate generation (PRD-7 typosquat adapter)
 
 # Test suite
 pytest>=8,<10
+playwright>=1.60,<2         # headless-chromium render smoke — the browser-level
+                            # outcome gate (prd-graph-outcome-gate). Imported only
+                            # by the smoke tests; chromium build 1223 ships cached.

@@ -68,6 +68,9 @@ def test_warm_crew_spawns_zero_subprocesses():
             db.add_mention(conn, tgt, rid, "target-x.com", "seed")
 
         mp.setattr(os, "environ", {**os.environ, "KIPI_WARM_SESSION": "1"})
+        # Explicit opt-in over the conftest warm-unavailable guard (runner
+        # faked below, so this stays offline).
+        mp.setattr(investigator, "warm_run_available", lambda: True)
         mp.setattr(investigator, "_run_agent", _cold_counter)
         mp.setattr(investigator, "_run_agent_warm", _warm_counter)
         try:

@@ -19,6 +19,7 @@ import re
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from investigations.enrich.base import Adapter, EnrichmentResult, EnrichmentError
 
@@ -44,6 +45,40 @@ _SITES = [
 ]
 
 _TIMEOUT_PER_SITE = 6
+
+# WhatsMyName data is vendored here; it makes the validators DATA-DRIVEN (the recurring
+# junk-node fix is deterministic body-validators, NOT another retro-clean pass — see MEMORY
+# graph-noise-needs-one-admission-gate). Curated _SITES still take precedence; wmn entries
+# only ADD a platform when they expose a clean e_string (existence) or m_string (missing).
+_WMN_DATA = Path(__file__).parent / "data" / "wmn-data.json"
+
+
+def _load_wmn(path=_WMN_DATA) -> list[tuple]:
+    """Build (name, uri_template, detector) tuples from a vendored WhatsMyName snapshot.
+    e_string -> ('contains', e_string); else m_string -> ('status_absent', m_string).
+    A site with neither marker is skipped (a bare 200 is not a trustworthy 'found')."""
+    try:
+        sites = json.loads(path.read_text()).get("sites", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    out = []
+    for s in sites:
+        name = s.get("name")
+        uri = s.get("uri_check")
+        if not name or not uri or "{account}" not in uri:
+            continue
+        template = uri.replace("{account}", "{u}")
+        if s.get("e_string"):
+            out.append((name, template, ("contains", s["e_string"])))
+        elif s.get("m_string"):
+            out.append((name, template, ("status_absent", s["m_string"])))
+    return out
+
+
+def _all_sites() -> list[tuple]:
+    """Curated _SITES + vendored wmn entries, curated winning on a name clash."""
+    curated_names = {n for n, _, _ in _SITES}
+    return _SITES + [s for s in _load_wmn() if s[0] not in curated_names]
 
 
 def _fetch(url: str, timeout: int) -> tuple[int, str]:
@@ -78,6 +113,16 @@ def _check(name: str, template: str, detector: tuple, username: str) -> dict:
         present = None
     elif kind == "status":
         present = True if status == 200 else (False if status == 404 else None)
+    elif kind == "status_absent":
+        # The false-positive fix: a 200 with the platform's MISSING marker = absent
+        # (IG login-wall / TikTok "couldn't find" / Telegram "Contact" all 200-no-account).
+        marker = detector[1]
+        if status == 404:
+            present = False
+        elif status == 200:
+            present = marker not in body
+        else:
+            present = None
     elif kind == "contains":
         present = bool(status == 200 and detector[1] in body)
     elif kind in ("json_present", "json_code", "json_notnull"):
@@ -108,6 +153,7 @@ def _check(name: str, template: str, detector: tuple, username: str) -> dict:
 
 class UsernameAdapter(Adapter):
     slug = "username"
+    watched_types = ('handle', 'username')  # NOT person: run() takes a bare handle (_HANDLE_RE), a spaced name is a guaranteed fail
     display_name = "Username presence sweep (curated platforms)"
     env_var = None  # keyless
     category = "social"
@@ -124,8 +170,9 @@ class UsernameAdapter(Adapter):
                 "username: pass a bare handle (2-40 chars, letters/digits/._-), no @")
 
         results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=min(10, len(_SITES))) as pool:
-            futs = {pool.submit(_check, n, t, d, username): n for n, t, d in _SITES}
+        sites = _all_sites()
+        with ThreadPoolExecutor(max_workers=min(10, len(sites))) as pool:
+            futs = {pool.submit(_check, n, t, d, username): n for n, t, d in sites}
             for fut in as_completed(futs):
                 try:
                     results.append(fut.result())

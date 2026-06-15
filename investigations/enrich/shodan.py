@@ -72,6 +72,7 @@ def _resolve_to_ip(target: str, key: str, timeout: int) -> str:
 
 class ShodanAdapter(Adapter):
     slug = "shodan"
+    watched_types = ('ip', 'domain', 'subdomain')
     display_name = "Shodan (host ports / services / CVEs)"
     env_var = "SHODAN_API_KEY"
     category = "infra"

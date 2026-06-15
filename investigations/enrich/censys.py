@@ -86,6 +86,7 @@ def _get(url: str, headers: dict, timeout: int) -> dict:
 
 class CensysAdapter(Adapter):
     slug = "censys"
+    watched_types = ('ip', 'domain', 'subdomain')
     display_name = "Censys (host services / ports / certs)"
     env_var = "CENSYS_PLATFORM_TOKEN"  # surfaced in the UI; Org ID / legacy pair via env or 'X:Y'
     category = "infra"

@@ -62,7 +62,7 @@
         <div class="text-xs text-ink-muted mt-1">degree {{ score.degree or 0 }} · {{ score.report_count or 0 }} reports</div>
         <button @click="open = !open" class="text-xs text-ink-muted hover:text-accent mt-1" x-text="open ? 'hide breakdown' : 'show breakdown'"></button>
         <div x-data="{ flagged: {{ 'true' if entity.flagged else 'false' }}, busy: false }" class="mt-3">
-          <button @click="busy=true; fetch('/api/entity/{{ entity.id }}/flag', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({flagged: !flagged})}).then(r=>r.json()).then(d=>{ flagged=d.flagged; busy=false; if (d.new_alerts) location.href='/alerts'; })"
+          <button @click="busy=true; fetch('/api/entity/{{ entity.id }}/flag', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({flagged: !flagged})}).then(r=>r.json()).then(d=>{ flagged=d.flagged; busy=false; if (d.new_alerts) window.kipiNav.go('/alerts'); })"
                   :disabled="busy"
                   class="text-xs px-2.5 py-1 rounded border transition"
                   :class="flagged ? 'bg-red-500/15 text-sev-high border-red-500/40' : 'bg-bg-soft text-ink-muted border-bg-border hover:text-ink'">
@@ -568,7 +568,7 @@ function assertPanel() {
         });
         const d = await r.json();
         if (d.error) { alert('Could not assert: ' + d.error); this.busy = false; return; }
-        location.reload();   // role / score / graph / claims all reflect the override
+        window.kipiNav.refresh();   // role / score / graph / claims all reflect the override
       } catch (e) {
         alert('Could not reach the server.');
         this.busy = false;
@@ -611,7 +611,7 @@ function renderMd(md) {
   return html;
 }
 function inlineMd(s) {
-  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" class="text-accent hover:underline">$1</a>');
+  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" onclick="window.kipiNav.entity(this.textContent);return false" class="text-accent hover:underline">$1</a>');
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
   s = s.replace(/`([^`]+?)`/g, '<code>$1</code>');

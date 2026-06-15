@@ -21,6 +21,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from investigations.storage import db
+from investigations import store
 from investigations.llm import client as llm
 from investigations import understand
 
@@ -113,6 +114,7 @@ def retype_entities(conn, case: str, schema: dict) -> dict:
     typed, done = 0, 0
     with ThreadPoolExecutor(max_workers=TYPING_CONCURRENCY) as pool:
         futures = [pool.submit(_classify, b) for b in batches]
+        retype_updates = []
         for fut in as_completed(futures):
             done += 1
             rows = fut.result()
@@ -123,11 +125,17 @@ def retype_entities(conn, case: str, schema: dict) -> dict:
                 if ct not in valid:
                     ct = "other"
                 try:
-                    conn.execute("UPDATE entities SET case_type = ? WHERE id = ?",
-                                 (ct, int(row["id"])))
+                    retype_updates.append(
+                        {"entity_id": int(row["id"]), "fields": {"case_type": ct}})
                     typed += 1
                 except (KeyError, ValueError, TypeError):
                     continue
+        if retype_updates:
+            # ONE event for the whole pass: the store applies every row update
+            # inside the event's savepoint (one log row, one bump).
+            store.apply_mutation(conn, store.entities_retyped_batch(
+                case, retype_updates, actor="pipeline:typing",
+                counts={"retyped": len(retype_updates)}))
             conn.commit()
             print(f"  retype {done}/{nb} batches")
     return {"typed": typed, "total": len(entities)}
@@ -142,7 +150,6 @@ def _extract_system(schema: dict) -> str:
     for r in schema.get("roles", []):
         tag = " (actor — give a sub_role)" if r.get("actor") else ""
         role_lines.append(f"   - {r['name']}{tag} — {r.get('description','')}")
-    sub_lines = [f"   - {s['name']}" for s in schema.get("sub_roles", [])]
     return (
         "You are an OSINT extractor recovering entities a crude regex MISSED.\n\n"
         f"CASE DOMAIN: {schema.get('domain','')}\n{schema.get('summary','')}\n\n"
@@ -244,11 +251,16 @@ def extract_missing(conn, case: str, schema: dict) -> dict:
                 elif not sub_role:
                     sub_role = "unknown"
 
-                eid = db.upsert_entity(conn, name, surface, rep["id"])
-                conn.execute(
-                    "UPDATE entities SET notes = ?, case_type = ?, sub_role = ? WHERE id = ?",
-                    (f"role:{role} — recovered by typing pass", case_type,
-                     sub_role or None, eid))
+                created = store.apply_mutation(conn, store.entity_upserted(
+                    case, name, surface, rep["id"], actor="pipeline:typing"))
+                if not created["applied"]:
+                    continue
+                eid = created["entity_id"]
+                store.apply_mutation(conn, store.entities_retyped_batch(
+                    case, [{"entity_id": eid, "fields": {
+                        "notes": f"role:{role} — recovered by typing pass",
+                        "case_type": case_type, "sub_role": sub_role or None}}],
+                    actor="pipeline:typing", counts={"recovered": 1}))
                 db.add_mention(conn, eid, rep["id"], name,
                                (ent.get("context") or name)[:300])
                 captured.add(name.lower())

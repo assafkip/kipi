@@ -31,7 +31,10 @@ _IMPORT_TO_DIST = {
 # manifest deliberately does not require them. fitz (PyMuPDF, AGPL) was
 # SWAPPED for pypdfium2 2026-06-10; its guarded import in ingest/pdf.py is a
 # user-optional accelerator, never a requirement.
-_OPTIONAL_FALLBACKS = {"pypdf", "fitz"}
+# holehe + httpx (PRD-6 email holehe mode) are heavy, self-guarded optional deps: the
+# adapter lazy-imports them and returns a clear "[holehe not installed]" result when
+# absent, so they are declared in requirements but not required to be installed here.
+_OPTIONAL_FALLBACKS = {"pypdf", "fitz", "holehe", "httpx"}
 
 
 def _third_party_imports() -> set[str]:

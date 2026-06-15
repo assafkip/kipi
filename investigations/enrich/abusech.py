@@ -21,6 +21,7 @@ THREATFOX_URL = "https://threatfox-api.abuse.ch/api/v1/"
 
 class AbuseChAdapter(Adapter):
     slug = "abusech"
+    watched_types = ('domain', 'subdomain', 'url', 'ip', 'hash_sha256', 'hash_md5', 'indicator')
     display_name = "abuse.ch — URLhaus + ThreatFox"
     env_var = "ABUSECH_AUTH_KEY"
     category = "reputation"

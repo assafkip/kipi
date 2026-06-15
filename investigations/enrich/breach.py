@@ -48,6 +48,7 @@ def _post(url: str, payload: dict, key: str, timeout: int) -> dict:
 
 class BreachAdapter(Adapter):
     slug = "breach"
+    watched_types = ('email', 'domain')
     display_name = "Breach intel (HudsonRock Cavalier — infostealer exposure)"
     env_var = "HUDSONROCK_API_KEY"
     category = "breach"

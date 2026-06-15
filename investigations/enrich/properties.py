@@ -58,6 +58,14 @@ PROPERTY_MAP: dict[str, tuple[str, str]] = {
     "carrier": ("carrier", "string"),
     "line_type": ("line_type", "string"),
     "phone_country": ("country", "string"),
+    # EXIF (image/PDF metadata). GPS is a typed `geo` property, NOT a new entity type
+    # (a coordinate has no pivot recipe — see PRD-5 risks).
+    "gps_coords": ("gps", "geo"),
+    "Make": ("device_make", "string"),
+    "Model": ("device_model", "string"),
+    "SerialNumber": ("device_serial", "string"),
+    "InternalSerialNumber": ("device_serial", "string"),
+    "CreateDate": ("capture_date", "string"),
 }
 
 

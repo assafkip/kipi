@@ -16,7 +16,6 @@ Two co-occurrence signals:
 
 Deterministic. No LLM. Writes typed_relationships with status='active'.
 """
-from investigations.storage import db
 from investigations.enrich.rel_vocab import normalize_rel
 
 # fingerprint entity_type → (rel_type, confidence, strength_label)
@@ -102,8 +101,11 @@ def correlate(conn, case: str | None = None) -> dict:
             hubs += 1
         ev = f"shares {fp['entity_type']} {fp['canonical_name'][:40]}"
         for pid in partners:
-            if db.upsert_typed_relationship(conn, pid, fp["id"], rel,
-                                            confidence=conf, evidence=ev):
+            from investigations import store
+            landed = store.apply_mutation(conn, store.edge_upserted(
+                case, pid, fp["id"], rel, actor="pipeline:fingerprints",
+                confidence=conf, evidence=ev))
+            if landed.get("created"):
                 created += 1
     conn.commit()
     return {"edges_created": created, "shared_fingerprints": hubs}
@@ -112,7 +114,6 @@ def correlate(conn, case: str | None = None) -> dict:
 def shared(conn, case: str | None = None, min_partners: int = 2) -> list[dict]:
     """The cross-domain findings: each fingerprint that links >= min_partners,
     with the partners it connects. Powers the Cross-domain view."""
-    rels = list(FINGERPRINT_TYPES)
     out = []
     for fp in _scoped_fp_ids(conn, case):
         rel, conf, strength = FINGERPRINT_TYPES[fp["entity_type"]]

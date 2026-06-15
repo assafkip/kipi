@@ -86,6 +86,19 @@ def test_discovery_no_anchor_when_input_has_no_entity():
     assert {e["value"] for e in d["found"]} == {"evil.xyz"}
 
 
+def test_live_dig_drops_person_candidate_narration():
+    # The live dig runs over TOOL NARRATION, where the proper-name regex matches UI/HTTP
+    # boilerplate ("Page Title", "Not Found") as person_candidate. The graph excludes that
+    # type from display, so the writer must not draw edges to it (trump-demo phantom edges).
+    step = {"type": "tool", "tool": "playwright",
+            "input": "navigate https://trumpfundus.com/api/mammoth/auth/check",
+            "result": "Ran Playwright. Page Title: Not Found. Found wallet 0x" + "ab"*20}
+    d = _step_discovery(step)
+    found = {e["value"] for e in d["found"]}
+    assert "Ran Playwright" not in found and "Page Title" not in found and "Not Found" not in found
+    assert any(v.startswith("0x") for v in found)   # the real wallet still lands
+
+
 def test_decorate_step_carries_discovery():
     d = _decorate_step({"type": "tool", "tool": "whois", "input": "promo.net",
                         "result": "registrant also owns giveaway.org"})

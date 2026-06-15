@@ -2,7 +2,7 @@
 {% block title %}Findings · kipi-investigations{% endblock %}
 {% block content %}
 <div class="max-w-5xl mx-auto" x-data="findingsView()"
-     x-init="if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (!document.querySelector(':focus')) location.reload(); })">
+     x-init="if (window.kipiOnCaseChange) window.kipiOnCaseChange(() => { if (!document.querySelector(':focus')) window.kipiNav.refresh(); })">
 
   <div class="flex items-start justify-between gap-3 mb-4">
     <div class="min-w-0">

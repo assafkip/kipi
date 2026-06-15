@@ -95,13 +95,14 @@ def _volume_warning(n: int, what: str) -> str | None:
 
 class WalletAdapter(Adapter):
     slug = "wallet"
+    watched_types = ('crypto_wallet', 'wallet')
     display_name = "Crypto wallet (BTC keyless / ETH via Etherscan)"
     env_var = None  # keyless for BTC; ETH self-guards on ETHERSCAN_API_KEY
     category = "chain"
     cost_per_call_usd = 0.0
 
     def modes(self) -> list[str]:
-        return ["auto", "btc", "eth"]
+        return ["auto", "btc", "eth", "erc20"]
 
     def run(self, query: str, mode: str | None = None,
             timeout: int = 40) -> list[EnrichmentResult]:
@@ -109,6 +110,9 @@ class WalletAdapter(Adapter):
         if not addr:
             raise EnrichmentError("wallet: empty address")
         m = (mode or "auto").lower()
+        # erc20: ERC-20 token flow (USDT/USDC move via tokentx, invisible to txlist).
+        if m == "erc20":
+            return self._eth_tokens(addr, timeout)
         chain = m if m in ("btc", "eth") else detect_chain(addr)
         if chain == "btc":
             return self._btc(addr, timeout)
@@ -222,3 +226,61 @@ class WalletAdapter(Adapter):
             confidence="medium" if tx_note else "high")
         eth_rows = [] if warning else _counterparty_results(counterparties, "eth", addr)
         return [header] + eth_rows
+
+    # --- ERC-20 token flow via Etherscan tokentx (PRD-2) --------------------------
+    def _eth_tokens(self, addr: str, timeout: int) -> list[EnrichmentResult]:
+        """Token transfers (USDT/USDC/etc) — where fraud money actually moves. The
+        native txlist (in _eth) misses these entirely; tokentx surfaces them. Each
+        distinct token counterparty is a promotable crypto_wallet node with the token
+        symbol on the edge (in the child summary + the header raw_json)."""
+        from investigations.enrich.base import resolve_key
+        key = resolve_key("wallet", "ETHERSCAN_API_KEY")
+        if not key:
+            return [EnrichmentResult(
+                result_type="document",
+                title=f"ERC-20 flow: {addr} [needs key]",
+                summary="ERC-20 token flow needs an Etherscan key (free tier at "
+                        "etherscan.io/apis). Add it on the Enrich page (wallet) or set "
+                        "$ETHERSCAN_API_KEY, then retry.",
+                confidence="low")]
+        txs = _get_json(
+            f"{_ETHERSCAN}?module=account&action=tokentx&address={addr}"
+            f"&page=1&offset=50&sort=desc&apikey={key}", timeout, "Etherscan")
+        tx_result = txs.get("result")
+        if not isinstance(tx_result, list):
+            # Etherscan signals errors (bad key / rate limit / NOTOK) as a string.
+            raise EnrichmentError(f"Etherscan: {txs.get('message') or tx_result or 'error'}")
+        rows = tx_result
+        a_lower = addr.lower()
+        seen: set[str] = set()
+        counterparties: list[tuple[str, str]] = []  # (address, tokenSymbol)
+        symbols: set[str] = set()
+        for tx in rows:
+            sym = (tx.get("tokenSymbol") or "?").strip()
+            symbols.add(sym)
+            for side in ("from", "to"):
+                a = (tx.get(side) or "").strip()
+                if a and a.lower() != a_lower and a.lower() not in seen:
+                    seen.add(a.lower())
+                    counterparties.append((a, sym))
+        warning = _volume_warning(len(counterparties), "token counterparties")
+        header = EnrichmentResult(
+            result_type="document",
+            title=f"ERC-20 flow: {addr} — {len(rows)} transfers, {len(symbols)} token(s)",
+            summary=(f"token transfers examined: {len(rows)}\n"
+                     f"tokens seen: {', '.join(sorted(symbols)) or 'none'}\n"
+                     f"distinct token counterparties: {len(counterparties)}"
+                     + (f"\n\n{warning}" if warning else "")),
+            url=f"https://etherscan.io/address/{addr}",
+            raw_json={"address": addr, "chain": "eth", "mode": "erc20",
+                      "tokens": sorted(symbols),
+                      "counterparties": [a for a, _ in counterparties],
+                      "counterparty_count": len(counterparties),
+                      "needs_decision": warning is not None},
+            confidence="high" if rows else "medium")
+        # Over threshold: hand the analyst the decision (no auto-spray), same as _eth.
+        rows_out = [] if warning else [EnrichmentResult(
+            result_type="profile", title=a,
+            summary=f"{sym} counterparty of {addr} (ERC-20 transfer).",
+            confidence="medium") for a, sym in counterparties]
+        return [header] + rows_out

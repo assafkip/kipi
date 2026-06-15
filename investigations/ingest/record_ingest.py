@@ -20,6 +20,7 @@ import io
 from pathlib import Path
 
 from investigations.storage import db
+from investigations import store
 from investigations.ingest import extractor as ext
 
 MAX_ROWS = 5000
@@ -185,9 +186,14 @@ def ingest(conn, path: Path, file_hash: str, investigation: str | None) -> dict 
             if key in seen_in_report:
                 continue
             seen_in_report.add(key)
-            eid = db.upsert_entity(conn, value, surface, report_id)
-            conn.execute("UPDATE entities SET case_type = COALESCE(case_type, ?) WHERE id = ?",
-                         (surface, eid))
+            # gate=False: typed-column dataset extraction never gated here
+            # pre-migration (columns are analyst-typed). Preserved verbatim.
+            # case_type stamps via COALESCE inside the SAME event (one event
+            # per cell, codex finding-2).
+            eid = store.apply_mutation(conn, store.entity_upserted(
+                investigation, value, surface, report_id,
+                actor=f"ingest:{report_id}", gate=False,
+                case_type_if_unset=surface))["entity_id"]
             db.add_mention(conn, eid, report_id, value, ctx)
             mentions += 1
             entities_added += 1

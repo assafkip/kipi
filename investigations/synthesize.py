@@ -13,7 +13,6 @@ Produces:
 import json
 from pathlib import Path
 
-from investigations.storage import db
 from investigations.llm import client as llm
 
 SYSTEM = """You are a FAANG-tier Senior Staff Investigator (Trust & Safety / Threat
@@ -88,15 +87,17 @@ Do not invent details — work only from the evidence provided."""
 
 
 def _gather_brief_data(conn, vault_dir: Path, case: str | None = None) -> dict:
-    # Optional case scope: one investigation's reports + the actors who recur
-    # across THIS case's reports (global pool, case-scoped views).
-    rep_where = "WHERE investigation = ? " if case else ""
-    rep_params = [case] if case else []
+    # Deterministic sections come from THE projection (sp3: one source — the
+    # same input set the replay digest pins; the brief can never render a
+    # different selection than the projected surfaces).
+    from investigations import projection
+    proj = projection.brief_inputs(conn, case)
+    # reports need source metadata beyond brief_inputs' comparable core.
+    rep_ids = [r["id"] for r in proj["reports"]]
     reports = [dict(r) for r in conn.execute(
         "SELECT id, title, source_path, investigation, ingested_at FROM reports "
-        f"{rep_where}ORDER BY ingested_at",
-        rep_params,
-    ).fetchall()]
+        f"WHERE id IN ({','.join('?' * len(rep_ids)) or 'NULL'}) ORDER BY ingested_at",
+        rep_ids).fetchall()] if rep_ids else []
 
     # Cross-report hubs: entities in 2+ of the case's reports (parenthesize the
     # role OR before AND-ing the case filter, else precedence bites).
@@ -140,29 +141,10 @@ def _gather_brief_data(conn, vault_dir: Path, case: str | None = None) -> dict:
     # BLIND to these — everything the autonomous investigator dug up never reached the
     # deliverable. Pull the (promotable + gated) findings and the assessment verdicts.
     agent_where = "AND run.investigation = ? " if case else ""
-    # PROMOTED findings only (extracted_entity_id is set when a finding clears the
-    # promotion gate and becomes a graph node). Gated / unproven findings still LAND
-    # but must NOT enter a customer brief as fact.
-    agent_findings = [dict(r) for r in conn.execute(
-        "SELECT er.title, er.summary, er.confidence FROM enrichment_results er "
-        "JOIN enrichment_runs run ON run.id = er.run_id "
-        f"WHERE run.provider_slug = 'agent' {agent_where}"
-        "AND er.extracted_entity_id IS NOT NULL "
-        "ORDER BY er.id DESC LIMIT 60",
-        ([case] if case else []),
-    ).fetchall()]
-    # GATED findings = leads the agent surfaced but couldn't corroborate (single-source /
-    # unverified / prose attributions with no clean indicator). They never reach the graph,
-    # so the brief is the only place they can appear — clearly marked as unverified leads.
-    agent_leads = [dict(r) for r in conn.execute(
-        "SELECT er.title, er.summary, er.confidence FROM enrichment_results er "
-        "JOIN enrichment_runs run ON run.id = er.run_id "
-        f"WHERE run.provider_slug = 'agent' {agent_where}"
-        "AND er.extracted_entity_id IS NULL "
-        "ORDER BY CASE er.confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, er.id DESC "
-        "LIMIT 40",
-        ([case] if case else []),
-    ).fetchall()]
+    # PROMOTED findings + unverified leads: straight from the projection
+    # (same selection rules; the bespoke SQL this replaces is deleted).
+    agent_findings = proj["findings"]
+    agent_leads = proj["leads"]
     # Pull a wider window than we keep, THEN filter to runs that actually carry an
     # attribution — so the actor-filter doesn't silently drop verdicts behind the cap.
     assessments = []

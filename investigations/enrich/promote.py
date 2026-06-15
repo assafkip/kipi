@@ -14,11 +14,27 @@ becomes a node, consistent with the analyst-as-top-authority model.
 """
 from __future__ import annotations
 
+import json
+import re
 from urllib.parse import urlparse
 
 from investigations.storage import db
 from investigations.ingest import extractor as _ex
 from investigations import annotations as annotations_mod
+
+# Multi-chain address shapes for _classify (PRD-2). Tron = T + 33 base58 (34 total);
+# Solana = 32-44 base58. base58 excludes 0/O/I/l and has no separators, so neither
+# collides with a domain (has '.') or an @handle (has '@'). Tron is matched BEFORE
+# Solana because a Tron address is itself valid 34-char base58.
+_TRON_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+_SOL_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# TON user-friendly address (PRD-3): EQ.../UQ... = 48 base64url chars. PRD-3 owns this
+# branch (PRD-2 never added TON), so a TON counterparty promotes to crypto_wallet, not
+# a dead 'indicator'. 48 chars > Solana's 44 max, so it can't collide with _SOL_RE.
+_TON_RE = re.compile(r"^[EU]Q[A-Za-z0-9_-]{46}$")
+# ASN (PRD-5): a bare "AS15169" promotes to the `asn` type (it had a recipe but no
+# producer until the asn adapter). Requires the AS prefix so a bare number isn't swept.
+_ASN_RE = re.compile(r"^AS\d+$", re.IGNORECASE)
 
 
 class CaseDeletedError(RuntimeError):
@@ -60,6 +76,8 @@ def _classify(name: str) -> str:
         return "indicator"
     if n.lower().startswith(("t.me/", "telegram.me/")):
         return "telegram_channel"
+    if _ASN_RE.fullmatch(n):           # AS15169 -> asn (PRD-5, closes the asn-orphan)
+        return "asn"
     if _ex.IPV4_RE.fullmatch(n):
         return "ip"
     if _ex.SHA256_RE.fullmatch(n):
@@ -68,15 +86,41 @@ def _classify(name: str) -> str:
         return "hash_md5"
     if _ex.WALLET_RE.fullmatch(n):
         return "crypto_wallet"
+    if _TRON_RE.fullmatch(n):          # Tron T-address (before Solana: also 34-char base58)
+        return "crypto_wallet"
+    if _TON_RE.fullmatch(n):           # TON EQ.../UQ... (48 base64url) — PRD-3
+        return "crypto_wallet"
     if _ex.EMAIL_RE.fullmatch(n):
         return "email"
     if n.lower().startswith(("http://", "https://")):
         return "url"
+    if _SOL_RE.fullmatch(n):           # Solana base58 32-44; after email/url, before handle/domain
+        return "crypto_wallet"
     if _ex.HANDLE_RE.fullmatch(n):
         return "handle"
     if _ex.DOMAIN_RE.fullmatch(n) or (" " not in n and "/" not in n and "." in n):
         return "domain"
     return "indicator"
+
+
+# An adapter may pin the type for a child row whose type _classify can't derive from the
+# bare string (OpenCorporates officer -> person, company -> org; dns_deep mail provider ->
+# org). promote_result honors this hint (PRD-6 / audit O-7 / correction #4).
+_PROMOTE_AS_ALLOWED = {"person", "org", "email", "domain", "ip", "handle",
+                       "crypto_wallet", "asn", "phone", "indicator"}
+
+
+def _promote_as_hint(raw_json) -> str | None:
+    """An adapter's explicit entity-type pin for a child row, if present and allowed."""
+    if isinstance(raw_json, str):
+        try:
+            raw_json = json.loads(raw_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(raw_json, dict):
+        return None
+    pa = (raw_json.get("promote_as") or "").strip().lower()
+    return pa if pa in _PROMOTE_AS_ALLOWED else None
 
 
 def _synthetic_report(conn, case: str | None, kind: str = "enrichment") -> int:
@@ -119,32 +163,28 @@ def add_manual_node(conn, name: str, entity_type: str, *, analyst: str = "anonym
         case = _primary_case(conn, link_to)
     rep_id = _synthetic_report(conn, case, kind="manual")
 
-    existing = conn.execute(
-        "SELECT id, provenance FROM entities WHERE canonical_name = ?", (name,)).fetchone()
-    if existing:
-        eid = existing["id"]
-        # Backfill provenance on a pre-existing node that has none (first-stamp-wins —
-        # don't overwrite how it originally entered the graph). (issue graph-provenance-fields)
-        if not existing["provenance"]:
-            conn.execute("UPDATE entities SET provenance = 'analyst' WHERE id = ?", (eid,))
-    else:
-        cur = conn.execute(
-            "INSERT INTO entities (canonical_name, entity_type, first_seen_report_id, provenance) "
-            "VALUES (?, ?, ?, 'analyst')", (name, etype, rep_id))
-        eid = cur.lastrowid
+    from investigations import store
+    # store.entity_upserted preserves the exact prior semantics: existing node
+    # by canonical_name returns its id with first-stamp-wins provenance
+    # backfill; a new node is created with provenance=analyst. The analyst
+    # actor keeps the top-authority admission bypass this path always had.
+    eid = store.apply_mutation(conn, store.entity_upserted(
+        case, name, etype, rep_id, actor=f"analyst:{analyst}",
+        provenance="analyst"))["entity_id"]
     db.add_mention(conn, eid, rep_id, name, "analyst-added node")
     if thumbnail and thumbnail.strip():
-        conn.execute("UPDATE entities SET thumbnail = ? WHERE id = ?",
-                     (thumbnail.strip()[:2000], eid))
+        store.apply_mutation(conn, store.analyst_annotated(
+            case, eid, {"thumbnail": thumbnail.strip()[:2000]},
+            actor=f"analyst:{analyst}"))
     if link_to and link_to != eid:
         # Controlled vocabulary: 'linked' is not a REL_VOCAB term — normalize the
         # analyst-link label so a manual node can't write a free-form edge (issue
         # rel-vocab-validator). 'linked' -> 'linked_to'.
         from investigations.enrich.rel_vocab import normalize_rel
         manual_rel = normalize_rel("linked") or "linked_to"
-        db.upsert_typed_relationship(conn, link_to, eid, manual_rel,
-                                     confidence="high", evidence="analyst-added",
-                                     provenance="analyst")
+        store.apply_mutation(conn, store.edge_upserted(
+            case, link_to, eid, manual_rel, actor=f"analyst:{analyst}",
+            confidence="high", evidence="analyst-added", provenance="analyst"))
         for row in conn.execute(
             "SELECT cluster_id FROM cluster_members WHERE entity_id = ?", (link_to,)).fetchall():
             conn.execute("INSERT OR IGNORE INTO cluster_members (cluster_id, entity_id) "
@@ -202,7 +242,13 @@ def _enrich_rel_candidate(provider: str, mode: str = "", hint: str = "") -> str:
             return "reverse_dns"
         return "registered_by"
     if p == "whoisxml":
-        return "prior_resolution" if m == "dns_history" else "same_registrant"
+        if m == "dns_history":
+            return "prior_resolution"
+        # Shared NS is infrastructure co-location, NOT registrant identity —
+        # same_registrant here would launder a weak pivot into attribution.
+        if m == "reverse_ns":
+            return "uses_nameserver"
+        return "same_registrant"
     if p == "ipgeo":
         return "geolocated"
     if p in ("virustotal", "abusech"):
@@ -236,12 +282,19 @@ def _enrich_rel_candidate(provider: str, mode: str = "", hint: str = "") -> str:
 def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
     """Turn one enrichment result into a node connected to the source actor."""
     r = conn.execute(
-        "SELECT er.id, er.title, er.summary, er.url, er.raw_json, run.entity_id AS src_entity_id, "
+        "SELECT er.id, er.title, er.summary, er.url, er.raw_json, er.decision, "
+        "run.entity_id AS src_entity_id, "
         "run.provider_slug, run.mode, run.investigation "
         "FROM enrichment_results er JOIN enrichment_runs run ON run.id = er.run_id "
         "WHERE er.id = ?", (result_id,)).fetchone()
     if not r:
         return {"error": "result not found"}
+    # Refuse to promote a finding the analyst already REJECTED (Codex gtl-2
+    # adversarial): a stale button / retry / direct call must not resurrect a
+    # rejected finding into the graph and flip its audit decision to accepted.
+    if r["decision"] == "rejected":
+        return {"error": "finding was rejected — clear the rejection before promoting",
+                "result_id": result_id}
     result = dict(r)
     name = _candidate_name(result)
     if not name:
@@ -260,6 +313,10 @@ def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
     # with no source link whose name isn't a recognizable indicator (it's the
     # provider's prose answer, e.g. 'Perplexity sonar') is rejected.
     etype = _classify(name)
+    # Honor an adapter's explicit type pin (officer -> person, company/provider -> org).
+    _hint = _promote_as_hint(result.get("raw_json"))
+    if _hint:
+        etype = _hint
     if not (result.get("url") or "").strip() and etype in ("indicator", "person", "person_candidate"):
         return {"error": "That's a summary, not an indicator — promote a result that has a source link "
                          "(domain / IP / URL), or open the actor's dossier to add it as a note."}
@@ -269,7 +326,12 @@ def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
     rep_id = _enrichment_report(conn, case)
     provider = result["provider_slug"]
 
-    eid = db.upsert_entity(conn, name, etype, rep_id, provenance=f"enrich:{provider}")
+    from investigations import store
+    # Analyst actor: promote IS the analyst accepting a gated finding — the
+    # finding already cleared its gate at landing; promotion never re-gated.
+    eid = store.apply_mutation(conn, store.entity_upserted(
+        case, name, etype, rep_id, actor=f"analyst:{analyst}",
+        provenance=f"enrich:{provider}"))["entity_id"]
     db.add_mention(conn, eid, rep_id, name, f"via {provider} enrichment")
 
     # Typed properties from the result's raw_json land on the promoted node, so its facts
@@ -291,8 +353,9 @@ def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
         rel = _enrich_rel_type(provider, result.get("mode"),
                                result.get("summary") or result.get("title"))
         db.add_relationship(conn, src_id, eid, rel, rep_id, evidence=ev, confidence=0.6)
-        db.upsert_typed_relationship(conn, src_id, eid, rel, evidence=ev,
-                                     provenance=f"enrich:{provider}")
+        store.apply_mutation(conn, store.edge_upserted(
+            case, src_id, eid, rel, actor=f"analyst:{analyst}",
+            evidence=ev, provenance=f"enrich:{provider}"))
         # Carry the new node into the source actor's cluster(s) so in-cluster graph
         # views surface it next to the actor it came from.
         for row in conn.execute(
@@ -315,6 +378,32 @@ def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
                                              author=f"{provider} (enrichment)")
     conn.commit()
 
+    # Capture the result's raw response as point-in-time evidence on the PROMOTED
+    # node (ea-1) — promotion can target a DIFFERENT entity than the run's source,
+    # so this is the only hook that grounds the promoted node's proof. Covers manual
+    # promote AND the agent path (land_findings calls promote_result). Wrapped: an
+    # evidence-capture failure must never unwind the promotion.
+    try:
+        if result.get("raw_json"):
+            from investigations import evidence as _evidence
+            _evidence.capture_artifact(
+                conn, eid, kind=f"promote:{provider}",
+                content=result["raw_json"], run_id=None, source_url=result.get("url"))
+            conn.commit()
+    except Exception:
+        conn.rollback()
+
+    # Record the analyst's ACCEPT decision (gtl-2): the decision column + a manual
+    # claim on the claims spine, so "analyst vouched for this node" is queryable
+    # audit, not just an implicit side effect of promotion. Wrapped: a decision-write
+    # failure must NEVER unwind the promotion the analyst already asked for.
+    try:
+        _set_decision(conn, result_id, "accepted")
+        _record_decision_claim(conn, eid, "accepted", analyst, evidence=name)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
     try:
         from investigations import analyze
         analyze.compute_threat_scores(conn)
@@ -324,6 +413,66 @@ def promote_result(conn, result_id: int, *, analyst: str = "anonymous") -> dict:
     return {"ok": True, "entity_id": eid, "name": name, "type": etype,
             "case": case, "linked_to": src_id if linked else None,
             "cross_case": _other_cases(conn, eid, case)}
+
+
+def _record_decision_claim(conn, entity_id: int, decision: str, analyst: str,
+                           evidence: str | None = None) -> None:
+    """Append an analyst promotion/rejection decision as a manual claim on the
+    claims spine. Lightweight by design — it does NOT reproject the graph or
+    rescore (a decision audit fact maps to no role/edge); it only records that the
+    analyst made this call, attributed + timestamped. Idempotent via the claims
+    UNIQUE constraint (report_id NULL)."""
+    if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'").fetchone():
+        return
+    # Explicit existence check, NOT INSERT OR IGNORE: report_id and object_entity_id
+    # are NULL here, and SQLite treats NULLs as DISTINCT in a UNIQUE constraint, so
+    # the constraint would never fire and retries/double-submits would duplicate the
+    # claim (Codex gtl-2 finding). Check-then-insert is the idempotency guard.
+    exists = conn.execute(
+        "SELECT 1 FROM claims WHERE entity_id = ? AND predicate = 'promotion_decision' "
+        "AND value = ? AND source = 'manual'", (entity_id, decision)).fetchone()
+    if exists:
+        return
+    conn.execute(
+        "INSERT INTO claims (entity_id, report_id, claim_type, predicate, "
+        " value, object_entity_id, confidence, evidence, status, source, author) "
+        "VALUES (?, NULL, 'attribute', 'promotion_decision', ?, NULL, 'analyst', ?, "
+        " 'active', 'manual', ?)",
+        (entity_id, decision, evidence or "", analyst))
+
+
+def reject_result(conn, result_id: int, *, analyst: str = "anonymous",
+                  reason: str | None = None) -> dict:
+    """Analyst REJECTS an enrichment finding (gtl-2): record decision='rejected' +
+    a rejection claim on the source actor entity, so a discarded finding leaves an
+    audit trail (today only volume 'revert' existed, with no analyst attribution).
+    Never promotes a node. Idempotent — re-rejecting is a no-op."""
+    r = conn.execute(
+        "SELECT er.id, er.title, run.entity_id AS src_entity_id "
+        "FROM enrichment_results er JOIN enrichment_runs run ON run.id = er.run_id "
+        "WHERE er.id = ?", (result_id,)).fetchone()
+    if not r:
+        return {"error": "result not found"}
+    prior = conn.execute("SELECT decision, extracted_entity_id FROM enrichment_results "
+                         "WHERE id = ?", (result_id,)).fetchone()
+    if prior and prior["decision"] == "rejected":
+        return {"ok": True, "already": "rejected", "result_id": result_id}
+    # Guard against rejecting an already-PROMOTED finding (Codex gtl-2 finding):
+    # the graph node/edge would survive while the audit said 'rejected'. The analyst
+    # must revert the promotion first; rejection is for un-promoted findings only.
+    if prior and (prior["decision"] == "accepted" or prior["extracted_entity_id"]):
+        return {"error": "finding already promoted — revert the promotion before rejecting",
+                "result_id": result_id}
+    _set_decision(conn, result_id, "rejected")
+    # The rejection claim attaches to the SOURCE actor (the entity whose run produced
+    # the finding) when there is one — a rejected finding never gets its own node.
+    if r["src_entity_id"]:
+        ev = (reason or r["title"] or "").strip()
+        _record_decision_claim(conn, r["src_entity_id"], "rejected", analyst, evidence=ev)
+    conn.commit()
+    return {"ok": True, "rejected": True, "result_id": result_id,
+            "source_entity_id": r["src_entity_id"]}
 
 
 # ----------------------------------------------------------------------------------
@@ -443,9 +592,12 @@ def materialize_to_cluster(conn, result_id: int, *, subset=None, label: str | No
                      "VALUES (?, ?)", (cluster_id, src_id))
 
     added = 0
+    from investigations import store
     for it in items:
         etype = _classify(it)
-        eid = db.upsert_entity(conn, it, etype, rep_id, provenance=f"enrich:{provider}")
+        eid = store.apply_mutation(conn, store.entity_upserted(
+            case, it, etype, rep_id, actor=f"analyst:{analyst}",
+            provenance=f"enrich:{provider}"))["entity_id"]
         db.add_mention(conn, eid, rep_id, it, f"via {provider} enrichment (materialized)")
         conn.execute("INSERT OR IGNORE INTO cluster_members (cluster_id, entity_id) "
                      "VALUES (?, ?)", (cluster_id, eid))
@@ -453,10 +605,10 @@ def materialize_to_cluster(conn, result_id: int, *, subset=None, label: str | No
             rel = _enrich_rel_type(provider)
             db.add_relationship(conn, src_id, eid, rel, rep_id,
                                 evidence=f"materialized from {provider}", confidence=0.6)
-            db.upsert_typed_relationship(
-                conn, src_id, eid, rel,
+            store.apply_mutation(conn, store.edge_upserted(
+                case, src_id, eid, rel, actor=f"analyst:{analyst}",
                 evidence=f"from {provider}: {', '.join(items[:6])}"[:200],
-                provenance=f"enrich:{provider}")
+                provenance=f"enrich:{provider}"))
         added += 1
 
     _set_decision(conn, result_id, f"cluster:{cluster_id}")

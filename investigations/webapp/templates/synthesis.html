@@ -43,14 +43,39 @@
 function briefActions() {
   return {
     busy: false, msg: '', ok: false,
+    // The brief runs as a SERVER job now, so it survives window-switch + reload. On load,
+    // reconnect to one already running (e.g. the analyst reloaded mid-generation).
+    init() { this.checkRunning(); },
+    async checkRunning() {
+      try {
+        const s = await fetch('/api/synthesize/status').then(r => r.json());
+        if (s.status === 'running') { this.busy = true; this.msg = 'Generating on the server…'; this.poll(); }
+      } catch (e) {}
+    },
     async regen() {
-      this.busy = true; this.msg = '';
+      this.busy = true; this.ok = false;
+      this.msg = 'Generating on the server — safe to switch windows or reload.';
       try {
         const d = await fetch('/api/synthesize', { method: 'POST' }).then(r => r.json());
         if (d.error) { this.ok = false; this.msg = d.error; this.busy = false; return; }
-        this.ok = true; this.msg = 'Brief regenerated — reloading…';
-        setTimeout(() => location.reload(), 600);
-      } catch (e) { this.ok = false; this.msg = 'Regeneration failed — try again'; this.busy = false; }
+        this.poll();
+      } catch (e) { this.ok = false; this.msg = 'Could not start — try again'; this.busy = false; }
+    },
+    // Poll the server job to completion. The server does the LLM pass, so backgrounding the
+    // tab can't kill it; the poll just reconnects to the result.
+    poll() {
+      const tick = async () => {
+        let s; try { s = await fetch('/api/synthesize/status').then(r => r.json()); }
+        catch (e) { setTimeout(tick, 2500); return; }   // transient (e.g. throttled tab) → retry
+        if (s.status === 'done') {
+          this.ok = true;
+          this.msg = (s.tradecraft_warning || 'Brief ready') + ' — reloading…';
+          setTimeout(() => window.kipiNav.refresh(), s.tradecraft_warning ? 2200 : 700);
+        } else if (s.status === 'error') {
+          this.ok = false; this.msg = s.error || 'Generation failed'; this.busy = false;
+        } else { setTimeout(tick, 1800); }
+      };
+      tick();
     },
   };
 }
@@ -83,7 +108,7 @@ function renderMd(md) {
   return html;
 }
 function inlineMd(s) {
-  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" class="text-accent hover:underline">$1</a>');
+  s = s.replace(/\[\[(.+?)\]\]/g, '<a href="#" onclick="window.kipiNav.entity(this.textContent);return false" class="text-accent hover:underline">$1</a>');
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
   s = s.replace(/`([^`]+?)`/g, '<code>$1</code>');

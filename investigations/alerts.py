@@ -180,12 +180,14 @@ def set_flag(conn, entity_id: int, flagged: bool, note=_UNCHANGED) -> int:
     - note left as _UNCHANGED preserves the existing note (a bare toggle from the
       UI must not wipe an analyst's note); pass a string to set it.
     """
-    if note is _UNCHANGED:
-        conn.execute("UPDATE entities SET flagged = ? WHERE id = ?",
-                     (1 if flagged else 0, entity_id))
-    else:
-        conn.execute("UPDATE entities SET flagged = ?, flagged_note = ? WHERE id = ?",
-                     (1 if flagged else 0, note, entity_id))
+    from investigations import store
+    from investigations.enrich.promote import _primary_case
+    fields = {"flagged": 1 if flagged else 0}
+    if note is not _UNCHANGED:
+        # a bare toggle must not wipe an analyst's note (preserved semantics)
+        fields["flagged_note"] = note
+    store.apply_mutation(conn, store.analyst_annotated(
+        _primary_case(conn, entity_id), entity_id, fields, actor="analyst"))
     conn.commit()
 
     if flagged:

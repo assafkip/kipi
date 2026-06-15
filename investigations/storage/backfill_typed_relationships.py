@@ -39,9 +39,12 @@ def backfill(conn) -> int:
             (r["src_entity_id"], r["dst_entity_id"], r["rel_type"])).fetchone()
         if exists:
             continue
-        if db.upsert_typed_relationship(
-                conn, r["src_entity_id"], r["dst_entity_id"], r["rel_type"],
-                evidence=r["evidence"], provenance="osint"):
+        from investigations import store
+        landed = store.apply_mutation(conn, store.edge_upserted(
+            None, r["src_entity_id"], r["dst_entity_id"], r["rel_type"],
+            actor="pipeline:backfill", evidence=r["evidence"],
+            provenance="osint"))
+        if landed.get("created"):
             created += 1
     conn.commit()
     return created

@@ -149,11 +149,26 @@ def test_modal_command_question_goes_to_agent():
             _restore()
 
 
+def test_one_hop_classifier_gating():
+    """prd: chat-one-hop-routing. The deterministic one-hop classifier must let DEEP /
+    whole-case / questions / unknown targets fall through to the warm agent (return None),
+    so only an explicit one-hop verb on a KNOWN node routes one-hop. These cases return
+    before any DB lookup (regex gating), so no seeded DB is needed."""
+    from investigations.webapp.app import _one_hop_target
+    c = "any-case"
+    _check("deep must NOT one-hop", _one_hop_target("deep investigate evil.com", c, None) is None)
+    _check("whole-case must NOT one-hop", _one_hop_target("run the investigation end to end", c, None) is None)
+    _check("map/whole must NOT one-hop", _one_hop_target("map out the whole network", c, None) is None)
+    _check("a question must NOT one-hop", _one_hop_target("what is evil.com?", c, None) is None)
+    _check("an unknown target falls to the agent", _one_hop_target("investigate totally-unknown-xyz999.com", c, None) is None)
+
+
 def main():
     test_question_routes_to_grounded_ask_when_no_warm()
     test_question_goes_to_warm_agent_when_live()
     test_action_phrasing_bypasses_ask()
     test_modal_command_question_goes_to_agent()
+    test_one_hop_classifier_gating()
     print("\nALL PASS: test_chat_ask_routing")
 
 

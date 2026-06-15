@@ -60,7 +60,7 @@ def test_keyless_core_stays_configured(no_keys):
 
 # Keyed-but-keyless-capable: jina works without a key (a key only raises rate
 # limits) — its is_configured() override returning True is deliberate.
-_KEYLESS_CAPABLE = {"jina", "shodan"}   # shodan: keyless InternetDB tier
+_KEYLESS_CAPABLE = {"jina", "shodan", "urlscan"}   # shodan: keyless InternetDB tier; urlscan: keyless search tier
 
 
 def test_keyed_providers_report_needs_key_not_crash(no_keys):

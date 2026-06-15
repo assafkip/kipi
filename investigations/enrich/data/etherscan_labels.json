@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "source": "brianleect/etherscan-labels (public dataset)",
+    "note": "Vendored seed snapshot — re-vendor periodically. T3 community labels, never a citable finding. Addresses are lower-cased.",
+    "vendored": "2026-06-12"
+  },
+  "0x722122df12d4e14e13ac3b6895a86e84145b6967": {"name": "Tornado.Cash: Router", "labels": ["tornado-cash", "mixer", "sanctioned"]},
+  "0x12d66f87a04a9e220743712ce6d9bb1b5616b8fc": {"name": "Tornado.Cash: 0.1 ETH", "labels": ["tornado-cash", "mixer", "sanctioned"]},
+  "0x47ce0c6ed5b0ce3d3a51fdb1c52dc66a7c3c2936": {"name": "Tornado.Cash: 1 ETH", "labels": ["tornado-cash", "mixer", "sanctioned"]},
+  "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf": {"name": "Tornado.Cash: 10 ETH", "labels": ["tornado-cash", "mixer", "sanctioned"]},
+  "0xa160cdab225685da1d56aa342ad8841c3b53f291": {"name": "Tornado.Cash: 100 ETH", "labels": ["tornado-cash", "mixer", "sanctioned"]},
+  "0x098b716b8aaf21512996dc57eb0615e2383e2f96": {"name": "Ronin Bridge Exploiter (Lazarus Group)", "labels": ["lazarus", "north-korea", "exploiter", "sanctioned"]},
+  "0x28c6c06298d514db089934071355e5743bf21d60": {"name": "Binance: Hot Wallet 14", "labels": ["binance", "exchange", "cex"]},
+  "0x3f5ce5fbfe3e9af3971dd833d26ba9b5c936f0be": {"name": "Binance", "labels": ["binance", "exchange", "cex"]},
+  "0x2faf487a4414fe77e2327f0bf4ae2a264a776ad2": {"name": "FTX Exchange", "labels": ["ftx", "exchange", "cex"]},
+  "0x2910543af39aba0cd09dbb2d50200b3e800a63d2": {"name": "Kraken", "labels": ["kraken", "exchange", "cex"]}
+}

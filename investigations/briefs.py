@@ -31,7 +31,6 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from investigations.storage import db
 from investigations.llm import client as llm
 
 

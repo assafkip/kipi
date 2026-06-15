@@ -1,6 +1,5 @@
 """Cross-report correlation. Finds entities that appear in multiple reports
 and surfaces connections."""
-from collections import defaultdict
 
 
 def cross_report_overlap(conn) -> list[dict]:
@@ -18,37 +17,6 @@ def cross_report_overlap(conn) -> list[dict]:
     ).fetchall()
     return [dict(r) for r in rows]
 
-
-def shared_entities(conn, report_a_id: int, report_b_id: int) -> list[dict]:
-    """Entities mentioned in both reports."""
-    rows = conn.execute(
-        "SELECT e.canonical_name, e.entity_type "
-        "FROM entities e "
-        "WHERE e.id IN (SELECT entity_id FROM mentions WHERE report_id = ?) "
-        "AND e.id IN (SELECT entity_id FROM mentions WHERE report_id = ?)",
-        (report_a_id, report_b_id),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def report_similarity_matrix(conn) -> dict[tuple[int, int], float]:
-    """Jaccard similarity between every pair of reports based on shared entity sets."""
-    reports = conn.execute("SELECT id, title FROM reports").fetchall()
-    entity_sets: dict[int, set[int]] = defaultdict(set)
-    rows = conn.execute("SELECT report_id, entity_id FROM mentions").fetchall()
-    for r in rows:
-        entity_sets[r["report_id"]].add(r["entity_id"])
-
-    matrix: dict[tuple[int, int], float] = {}
-    ids = [r["id"] for r in reports]
-    for i, a in enumerate(ids):
-        for b in ids[i + 1:]:
-            sa, sb = entity_sets.get(a, set()), entity_sets.get(b, set())
-            union = sa | sb
-            if not union:
-                continue
-            matrix[(a, b)] = len(sa & sb) / len(union)
-    return matrix
 
 
 def auto_link_aliases(conn, similarity_threshold: float = 0.8) -> int:

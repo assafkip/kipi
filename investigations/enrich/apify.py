@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import urllib.request
 import urllib.error
-import time
 
 from investigations.enrich.base import Adapter, EnrichmentResult, EnrichmentError
 
@@ -40,6 +39,7 @@ ACTOR_INPUT_BUILDERS = {
 
 class ApifyAdapter(Adapter):
     slug = "apify"
+    watched_types = ("domain", "subdomain", "url", "ip", "email", "phone", "handle", "person", "org", "telegram_channel", "crypto_wallet", "wallet", "asn", "indicator", "username", "fingerprint", "hash_sha256", "hash_md5")  # type-agnostic research tier: full investigable set (deliberate)
     display_name = "Apify Actors (LinkedIn, IG, Telegram, Twitter, Google Maps, +50)"
     env_var = "APIFY_TOKEN"  # Apify's documented standard; matches project .mcp.json
     category = "scrape"

@@ -173,7 +173,7 @@ def test_triage_rejects_non_email():
 def test_registered_in_registry_keyless():
     from investigations.enrich.registry import get_adapter
     a = get_adapter("email")
-    assert a.env_var is None and a.modes() == ["triage", "headers"]
+    assert a.env_var is None and a.modes() == ["triage", "headers", "holehe"]
 
 
 def test_provider_seed_row_exists_fk_safe():

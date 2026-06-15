@@ -47,6 +47,7 @@ def _fetch(url: str, key: str, timeout: int) -> str:
 
 class JinaAdapter(Adapter):
     slug = "jina"
+    watched_types = ("domain", "subdomain", "url", "ip", "email", "phone", "handle", "person", "org", "telegram_channel", "crypto_wallet", "wallet", "asn", "indicator", "username", "fingerprint", "hash_sha256", "hash_md5")  # type-agnostic research tier: full investigable set (deliberate)
     display_name = "Jina Reader / Search"
     env_var = "JINA_API_KEY"
     category = "reader"

@@ -154,6 +154,7 @@ def _detect(indicator: str) -> str:
 
 class VirusTotalAdapter(Adapter):
     slug = "virustotal"
+    watched_types = ('domain', 'subdomain', 'url', 'ip', 'hash_sha256', 'hash_md5', 'indicator')
     display_name = "VirusTotal (domain / IP / hash / URL)"
     env_var = "VIRUSTOTAL_API_KEY"
     category = "reputation"
