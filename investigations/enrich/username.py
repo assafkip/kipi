@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import urlencode as _urlencode
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,7 +34,16 @@ _HANDLE_RE = re.compile(r"^[A-Za-z0-9._-]{2,40}$")
 _SITES = [
     ("GitHub", "https://github.com/{u}", ("status",)),
     ("GitLab", "https://gitlab.com/{u}", ("status",)),
-    ("Reddit", "https://www.reddit.com/user/{u}/about.json", ("json_present", "data.id")),
+    # ARCTIC SHIFT, not reddit.com. `www.reddit.com/user/<u>/about.json` returns
+    # 403 from any datacenter IP, and this detector reads a 403 as
+    # INDETERMINATE, so the Reddit row returned None from every host that is not
+    # a home connection. The mirror needs no auth.
+    #
+    # Its answer is WEAKER AND HONEST, and the detector is renamed so the row
+    # does not quietly start meaning something new: `reddit_public_activity`
+    # proves a handle has PUBLIC ACTIVITY, not that the account exists. A lurker
+    # reads absent.
+    ("Reddit", "https://www.reddit.com/user/{u}", ("reddit_public_activity",)),
     ("Keybase", "https://keybase.io/_/api/1.0/user/lookup.json?username={u}",
      ("json_code", "them")),
     ("HackerNews", "https://hacker-news.firebaseio.com/v0/user/{u}.json", ("json_notnull",)),
@@ -43,6 +53,30 @@ _SITES = [
     ("Telegram", "https://t.me/{u}", ("contains", "tgme_page_title")),
     ("Gravatar", "https://gravatar.com/{u}", ("status",)),
 ]
+
+
+from investigations.enrich import reddit_arctic as _reddit_arctic
+
+
+def _reddit_has_public_activity(username: str, *, limit: int = 5) -> bool:
+    """True when the handle has posts or comments in the Arctic Shift archive.
+
+    A WEAKER CLAIM than "this account exists", deliberately. A lurker with no
+    public activity reads absent, and the detector name says so rather than
+    letting the row quietly mean something new.
+    """
+    url = _reddit_arctic.ARCTIC_BASE + "/api/comments/search?" + \
+        _urlencode({"author": username, "limit": limit, "sort": "desc",
+                    "fields": "id"})
+    rows = _reddit_arctic._items(
+        _reddit_arctic._get_json(url, _reddit_arctic.DEFAULT_TIMEOUT))
+    if rows:
+        return True
+    url = _reddit_arctic.ARCTIC_BASE + "/api/posts/search?" + \
+        _urlencode({"author": username, "limit": limit, "sort": "desc",
+                    "fields": "id"})
+    return bool(_reddit_arctic._items(
+        _reddit_arctic._get_json(url, _reddit_arctic.DEFAULT_TIMEOUT)))
 
 _TIMEOUT_PER_SITE = 6
 
@@ -106,9 +140,29 @@ def _check(name: str, template: str, detector: tuple, username: str) -> dict:
     """Return {site, present, status, url} for one site. present is True/False/None
     (None = indeterminate / errored)."""
     url = template.format(u=username)
-    status, body = _fetch(url, _TIMEOUT_PER_SITE)
     kind = detector[0]
     present: bool | None = None
+
+    if kind == "reddit_public_activity":
+        # No _fetch: this asks the mirror, not the profile page.
+        #
+        # MEASURED, four handles, because an empty answer and an error had to be
+        # told apart before either could be trusted:
+        #   spez                                  5 posts,  5 comments
+        #   AutoModerator                         5 posts,  5 comments
+        #   a well formed, unused handle          0 posts,  0 comments
+        #   a 35-character handle                 HTTP 400
+        # So EMPTY is a real absent, and the 400 is the mirror refusing a handle
+        # longer than Reddit's own 20-character limit, where indeterminate is
+        # the right answer: nothing was looked up, so nothing was learned.
+        try:
+            present = _reddit_has_public_activity(username)
+        except Exception:
+            present = None          # a refused read is indeterminate, never absent
+        return {"site": name, "present": present,
+                "status": 200 if present is not None else 0, "url": url}
+
+    status, body = _fetch(url, _TIMEOUT_PER_SITE)
     if status == 0:
         present = None
     elif kind == "status":
