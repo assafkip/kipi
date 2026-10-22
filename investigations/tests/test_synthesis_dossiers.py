@@ -1,4 +1,4 @@
-"""k4p-03 reproducer: the synthesis brief reaches 4_points report quality — Key
+"""k4p-03 reproducer: the synthesis brief reaches example_instance report quality — Key
 Judgments + per-target dossiers + A–F graded evidence — instead of a flat one-line
 fact list (the 'disjointed' brief).
 
@@ -15,7 +15,7 @@ def _ok(label, cond):
     print(f"  ok  {label}")
 
 
-def test_system_requires_4points_report_shape():
+def test_system_requires_example_instance_report_shape():
     s = synthesize.SYSTEM
     _ok("SYSTEM requires Key judgments (KJ structure)", "Key judgments" in s and "KJ-1" in s)
     _ok("SYSTEM requires per-target dossiers", "Target dossiers" in s)
@@ -28,12 +28,12 @@ def _data():
         "active_infra": ["trumpfundus.com"], "dead_infra": [],
         "reports": [{"title": "Seed", "ingested_at": "2026-06-08", "source_path": "s.md"}],
         "hubs_by_role": {},
-        "assessments": [{"attributed_actor": "Markk Bennett", "overall_confidence": "medium",
+        "assessments": [{"attributed_actor": "John Doe", "overall_confidence": "medium",
                          "best_judgment": "operator of the trump scam cluster"}],
         "agent_findings": [
             {"title": "trumpfundus.com", "summary": "Solana drainer, VT malicious", "confidence": "high"},
             {"title": "trumpfundus.com", "summary": "Cloudflare-masked origin", "confidence": "medium"},
-            {"title": "trumpstake.us", "summary": "registrant Markk Bennett via WHOIS", "confidence": "high"},
+            {"title": "trumpstake.us", "summary": "registrant John Doe via WHOIS", "confidence": "high"},
         ],
         "agent_leads": [],
         "dossiers": {},
@@ -63,7 +63,7 @@ def test_no_silent_truncation():
 
 
 if __name__ == "__main__":
-    test_system_requires_4points_report_shape()
+    test_system_requires_example_instance_report_shape()
     test_prompt_feeds_per_target_dossiers()
     test_no_silent_truncation()
     print("\nall green")

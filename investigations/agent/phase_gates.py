@@ -1,6 +1,6 @@
 """Mid-run analyst steering: phase gates over the warm session (4pa-03).
 
-4_points lets the analyst sit in the loop — the run works a phase, presents what
+example_instance lets the analyst sit in the loop — the run works a phase, presents what
 it found, and PAUSES for "do it" / "go this way instead" / "stop". kipi's runs
 were fire-and-forget. This adds the same gate: a phased run that pauses between
 phases and resumes on an analyst command (continue / redirect / stop), driven

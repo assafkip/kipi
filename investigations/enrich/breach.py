@@ -1,6 +1,6 @@
 """Breach-intel adapter — HudsonRock Cavalier (infostealer exposure).
 
-The 4_points Level-1.5 tier: check breach / infostealer exposure BEFORE paid scraping —
+The example_instance Level-1.5 tier: check breach / infostealer exposure BEFORE paid scraping —
 often the highest-signal early pivot (G-BREACH). Query by domain (employees/users
 infected by infostealers) or by email/login (stealer records).
 

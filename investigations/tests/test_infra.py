@@ -1,6 +1,6 @@
 """Infra adapter -- RDAP-redacted registrant falls back to raw WHOIS.
 
-Regression guard for D1 (replay-4points-case031): kipi's `infra` adapter was
+Regression guard for D1 (replay-example_instance-case031): kipi's `infra` adapter was
 RDAP-only in practice -- when RDAP returned non-empty infrastructure (domain +
 nameservers) but NO registrant (the .us ccTLD case), the raw-whois fallback never
 fired and the actor layer was silently lost. The fix: fall back to raw whois when
@@ -31,10 +31,10 @@ RDAP_WITH_REGISTRANT = (
 RAW_WHOIS_REGISTRANT = (
     "Domain Name: trumpstake.us\n"
     "Registrar: NameCheap, Inc.\n"
-    "Registrant Name: Markk Bennett\n"
+    "Registrant Name: John Doe\n"
     "Registrant Organization: stakeus\n"
-    "Registrant Phone: +1.8075258080\n"
-    "Registrant Email: markk.bennett.2025@gmail.com"
+    "Registrant Phone: +1.202.555.0143\n"
+    "Registrant Email: john.doe.operator@example.com"
 )
 
 
@@ -56,7 +56,7 @@ def test_redacted_rdap_falls_back_to_whois(mp):
     mp.setattr(infra, "_rdap_domain", lambda d, t: RDAP_NO_REGISTRANT)
     mp.setattr(infra, "_run", lambda cmd, t: RAW_WHOIS_REGISTRANT)
     summary = _run_whois("trumpstake.us")
-    assert "Markk Bennett" in summary, f"registrant lost; got:\n{summary}"
+    assert "John Doe" in summary, f"registrant lost; got:\n{summary}"
     assert "NameCheap" in summary, f"registrar lost; got:\n{summary}"
     # the RDAP infra is still present (nameservers preserved)
     assert "cloudflare" in summary.lower(), "RDAP infra dropped on fallback"
@@ -84,7 +84,7 @@ def test_empty_rdap_still_falls_back(mp):
     mp.setattr(infra, "_rdap_domain", lambda d, t: "")
     mp.setattr(infra, "_run", lambda cmd, t: RAW_WHOIS_REGISTRANT)
     summary = _run_whois("trumpstake.us")
-    assert "Markk Bennett" in summary
+    assert "John Doe" in summary
     print("  ok  empty RDAP -> raw whois (unchanged)")
 
 

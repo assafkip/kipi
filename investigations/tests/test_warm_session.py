@@ -310,7 +310,7 @@ def _assert_warm_budget_breaker():
     only deterministic leash is the tool-budget PreToolUse hook injected through settings=.
     Prove it is attached on EVERY path (deep AND bounded) when KIPI_WARM_TOOL_BUDGET>0, and
     that the budget file + KIPI_BUDGET_FILE env are wired. This is kipi's equivalent of
-    4_points' 50-call breaker — the fix for 'the budget hook is plumbed but dead'."""
+    example_instance's 50-call breaker — the fix for 'the budget hook is plumbed but dead'."""
     import json as _json
     import os
     from investigations.agent import warm_session as ws

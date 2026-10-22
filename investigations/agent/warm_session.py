@@ -1,6 +1,6 @@
 """Warm investigation session manager (4pa-01).
 
-4_points loads MCP once per session and stays warm. kipi cold-boots 5 MCP
+example_instance loads MCP once per session and stays warm. kipi cold-boots 5 MCP
 servers on every `claude -p` spawn (investigator.py::_run_agent). 4pa-00 proved
 a single long-lived ClaudeSDKClient keeps MCP booted ONCE across turns
 (docs/22). This module is the warm path: a per-case session that connects the
@@ -467,7 +467,7 @@ def _sdk_mcp_servers(inv) -> dict:
 
 
 def _warm_bounded() -> bool:
-    """Warm sessions dig DEEP by default (chase the network freely, 4_points parity) —
+    """Warm sessions dig DEEP by default (chase the network freely, example_instance parity) —
     the leads-first/one-hop cage was the regression. Depth is the agent's OWN judgment:
     it runs to natural completion (recursive-completeness doctrine + the max-turns
     backstop), NOT a wall-clock deadline — a real dig is never killed mid-investigation
@@ -478,7 +478,7 @@ def _warm_bounded() -> bool:
 
 def _warm_tool_budget() -> int:
     """Tool-call circuit-breaker for a warm turn (default 150; a live deep dig runs ~30-60
-    tool calls). This is kipi's equivalent of 4_points' 50-call PreToolUse breaker — but
+    tool calls). This is kipi's equivalent of example_instance's 50-call PreToolUse breaker — but
     injected through ClaudeAgentOptions, because the warm agent runs with setting_sources=[]
     and never loads repo hooks (the reason backfilling .claude/rules can't leash it). It is a
     runaway backstop, NOT the control: a normal dig concludes well under it, and on the cap

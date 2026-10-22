@@ -52,7 +52,7 @@ def test_promote_records_accept_decision_and_claim():
     path = _db_path()
     with db.connect(path) as conn:
         actor, res = _mk_finding(conn)
-        out = promote_mod.promote_result(conn, res, analyst="alice")
+        out = promote_mod.promote_result(conn, res, analyst="alina")
         assert out.get("ok"), out
         eid = out["entity_id"]
         assert _decision(conn, res) == "accepted"
@@ -61,7 +61,7 @@ def test_promote_records_accept_decision_and_claim():
         author = conn.execute(
             "SELECT author FROM claims WHERE entity_id = ? AND predicate = 'promotion_decision'",
             (eid,)).fetchone()["author"]
-        assert author == "alice"
+        assert author == "alina"
 
 
 def test_reject_records_decision_and_claim_on_source():
@@ -94,7 +94,7 @@ def test_decision_write_failure_never_unwinds_promotion():
         # Make the decision-claim write raise; the promotion itself must still stand.
         with mock.patch.object(promote_mod, "_record_decision_claim",
                                side_effect=RuntimeError("boom")):
-            out = promote_mod.promote_result(conn, res, analyst="alice")
+            out = promote_mod.promote_result(conn, res, analyst="alina")
         assert out.get("ok"), "promotion must succeed despite a decision-write failure"
         assert conn.execute(
             "SELECT 1 FROM entities WHERE canonical_name = 'evil.example.com'").fetchone(), \
@@ -107,9 +107,9 @@ def test_accept_decision_claim_idempotent_on_double_promote():
     path = _db_path()
     with db.connect(path) as conn:
         actor, res = _mk_finding(conn, slug="pd-dbl")
-        out1 = promote_mod.promote_result(conn, res, analyst="alice")
+        out1 = promote_mod.promote_result(conn, res, analyst="alina")
         eid = out1["entity_id"]
-        promote_mod.promote_result(conn, res, analyst="alice")
+        promote_mod.promote_result(conn, res, analyst="alina")
         assert _decision_claims(conn, eid, "accepted") == 1, "double promote must not duplicate the claim"
 
 
@@ -119,7 +119,7 @@ def test_cannot_reject_already_promoted():
     path = _db_path()
     with db.connect(path) as conn:
         actor, res = _mk_finding(conn, slug="pd-prom-rej")
-        promote_mod.promote_result(conn, res, analyst="alice")
+        promote_mod.promote_result(conn, res, analyst="alina")
         out = promote_mod.reject_result(conn, res, analyst="bob")
         assert out.get("error"), "must refuse to reject an already-promoted finding"
         assert _decision(conn, res) == "accepted", "decision must stay accepted"
@@ -132,7 +132,7 @@ def test_cannot_promote_already_rejected():
     with db.connect(path) as conn:
         actor, res = _mk_finding(conn, slug="pd-rej-prom")
         promote_mod.reject_result(conn, res, analyst="bob")
-        out = promote_mod.promote_result(conn, res, analyst="alice")
+        out = promote_mod.promote_result(conn, res, analyst="alina")
         assert out.get("error"), "must refuse to promote a rejected finding"
         assert _decision(conn, res) == "rejected", "decision must stay rejected"
         assert conn.execute(

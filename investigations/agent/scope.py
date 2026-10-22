@@ -31,7 +31,7 @@ _TARGETED_BELT = {
     "breach", "whoisxml", "jina",
 }
 # Search / recall tools. NOT blanket-allowed (replay: the agent search-mapped the network
-# through them). The line 4_points drew (ops-log [058] vs [066]): searching to ATTRIBUTE the
+# through them). The line example_instance drew (ops-log [058] vs [066]): searching to ATTRIBUTE the
 # in-scope targets is autonomous; ENUMERATING the network (a search NAMING a new domain) was
 # human-gated. So: deny a search that names an OUT-OF-SCOPE entity; allow in-scope/general.
 _SEARCH_MCP = {"web_search", "tavily_search", "exa_search", "perplexity_ask"}
@@ -40,7 +40,7 @@ _SEARCH_BELT = {"perplexity", "exa", "tavily", "web_search"}
 # Tools that ENUMERATE the network from one entity: reverse-WHOIS turns a registrant into
 # EVERY other domain that registrant owns; dns_history turns a domain into its historical
 # infra. Their OUTPUT is the network expansion itself — not attribution of one node — so on
-# the bounded path they are ALWAYS a lead, even when the input entity is in-roster. 4_points
+# the bounded path they are ALWAYS a lead, even when the input entity is in-roster. example_instance
 # gated this behind the analyst (ops-log [066]). These are the two whoisxml-adapter modes.
 _ENUMERATION_MCP = {"reverse_whois", "dns_history"}
 _ENUMERATION_BELT = {"whoisxml"}
@@ -157,14 +157,14 @@ def _deny(target: str, search: bool = False) -> str:
     verb = "search for" if search else "investigate"
     return (f"out of scope: '{target}' is not in the case roster. Don't {verb} it — it's a "
             "LEAD; surface it in your findings and the analyst promotes it to expand it "
-            "(RULE-112, one hop). 4_points gated network enumeration behind the analyst.")
+            "(RULE-112, one hop). example_instance gated network enumeration behind the analyst.")
 
 
 def _deny_enumeration(target: str) -> str:
     return (f"network enumeration: reverse-WHOIS / DNS-history on '{target}' expands the case "
             f"to the operator's OTHER infrastructure. Don't run it — surface '{target}' and "
             "the pivot as a LEAD; the analyst promotes it to expand the network (RULE-112). "
-            "4_points gated enumeration behind the analyst (ops-log [066]).")
+            "example_instance gated enumeration behind the analyst (ops-log [066]).")
 
 
 def gate(tool_name: str, tool_input: dict, roster: set[str]) -> tuple[bool, str]:
@@ -173,7 +173,7 @@ def gate(tool_name: str, tool_input: dict, roster: set[str]) -> tuple[bool, str]
        in the roster, else deny (→ lead).
     2. Search/recall (perplexity/exa/tavily/web_search): deny only when the query NAMES an
        OUT-OF-SCOPE entity — that's enumerating the network. Allow searches about in-scope
-       entities or general topics (attribution). This is the 4_points line ([058] vs [066]).
+       entities or general topics (attribution). This is the example_instance line ([058] vs [066]).
     3. Everything else (reasoning / ToolSearch / internal): allow.
 
     Enumeration tools (reverse_whois / dns_history / whoisxml belt) are denied FIRST — they

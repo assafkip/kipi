@@ -48,12 +48,12 @@ def test_build_reference_picks_up_confirmed_actors_aliases_emails():
     with _conn() as conn:
         rep = _report(conn, "case-a")
         # confirmed: analyst-authored handle + flagged person
-        h = _entity(conn, "@Alice", "handle", rep, provenance="analyst")
-        p = _entity(conn, "Alice Cooper", "person", rep, flagged=True)
-        db.add_alias(conn, h, "@alice_alt")
+        h = _entity(conn, "@Alina", "handle", rep, provenance="analyst")
+        p = _entity(conn, "Alina Cooper", "person", rep, flagged=True)
+        db.add_alias(conn, h, "@alina_alt")
         db.add_alias(conn, p, "A. Cooper")
         # an email crosslinked to the confirmed person, case-scoped
-        em = _entity(conn, "alice@proton.me", "email", rep)
+        em = _entity(conn, "alina@proton.me", "email", rep)
         _edge(conn, p, em)
         # NOT confirmed: an agent-discovered handle in the same case
         _entity(conn, "@bob", "handle", rep, provenance="agent")
@@ -61,11 +61,11 @@ def test_build_reference_picks_up_confirmed_actors_aliases_emails():
 
         ref = identity_anchor.build_reference(conn, "case-a")
         assert not ref.is_empty
-        assert "alice" in ref.handles                 # canonical_name, @-stripped + lowered
-        assert "alice_alt" in ref.handles             # alias bucketed to handles
-        assert "alice cooper" in ref.names
+        assert "alina" in ref.handles                 # canonical_name, @-stripped + lowered
+        assert "alina_alt" in ref.handles             # alias bucketed to handles
+        assert "alina cooper" in ref.names
         assert "a. cooper" in ref.names               # alias bucketed to names
-        assert "alice@proton.me" in ref.emails
+        assert "alina@proton.me" in ref.emails
         assert "bob" not in ref.handles               # unconfirmed (provenance=agent) excluded
 
 
@@ -84,11 +84,11 @@ def test_build_reference_is_case_scoped():
     with _conn() as conn:
         rep_a = _report(conn, "case-a")
         rep_b = _report(conn, "case-b")
-        _entity(conn, "@alice", "handle", rep_a, provenance="analyst")
+        _entity(conn, "@alina", "handle", rep_a, provenance="analyst")
         _entity(conn, "@carol", "handle", rep_b, provenance="analyst")
         conn.commit()
         ref = identity_anchor.build_reference(conn, "case-a")
-        assert "alice" in ref.handles
+        assert "alina" in ref.handles
         assert "carol" not in ref.handles            # other case excluded by the join
 
 
@@ -96,7 +96,7 @@ def test_cross_case_linked_email_does_not_leak():
     with _conn() as conn:
         rep_a = _report(conn, "case-a")
         rep_b = _report(conn, "case-b")
-        subj = _entity(conn, "@alice", "handle", rep_a, provenance="analyst")
+        subj = _entity(conn, "@alina", "handle", rep_a, provenance="analyst")
         # email linked to the subject by an edge, but mentioned ONLY in case-b
         em = _entity(conn, "leak@evil.com", "email", rep_b)
         _edge(conn, subj, em)
@@ -108,11 +108,11 @@ def test_cross_case_linked_email_does_not_leak():
 def test_build_reference_no_throw_when_typed_relationships_missing():
     with _conn() as conn:
         rep = _report(conn, "case-a")
-        _entity(conn, "@alice", "handle", rep, provenance="analyst")
+        _entity(conn, "@alina", "handle", rep, provenance="analyst")
         conn.execute("DROP TABLE typed_relationships")
         conn.commit()
         ref = identity_anchor.build_reference(conn, "case-a")   # must not raise
-        assert "alice" in ref.handles
+        assert "alina" in ref.handles
         assert ref.emails == frozenset()
 
 
@@ -126,26 +126,26 @@ def test_falsy_case_is_empty():
 
 def _ref():
     return identity_anchor.Reference(
-        handles=frozenset({"alice"}), names=frozenset({"alice cooper"}),
-        emails=frozenset({"alice@proton.me"}))
+        handles=frozenset({"alina"}), names=frozenset({"alina cooper"}),
+        emails=frozenset({"alina@proton.me"}))
 
 
 def test_classify_match_on_handle_name_email():
     ref = _ref()
-    assert identity_anchor.classify(ref, "handle", "@Alice") == "match"
-    assert identity_anchor.classify(ref, "username", "alice") == "match"
-    assert identity_anchor.classify(ref, "person", "Alice Cooper") == "match"
-    assert identity_anchor.classify(ref, "email", "ALICE@proton.me") == "match"
+    assert identity_anchor.classify(ref, "handle", "@Alina") == "match"
+    assert identity_anchor.classify(ref, "username", "alina") == "match"
+    assert identity_anchor.classify(ref, "person", "Alina Cooper") == "match"
+    assert identity_anchor.classify(ref, "email", "ALINA@proton.me") == "match"
 
 
 def test_classify_unknown_paths():
     ref = _ref()
     assert identity_anchor.classify(ref, "handle", "@bob") == "unknown"
-    assert identity_anchor.classify(ref, "domain", "alice") == "unknown"   # non-person type
+    assert identity_anchor.classify(ref, "domain", "alina") == "unknown"   # non-person type
     assert identity_anchor.classify(ref, "handle", "") == "unknown"
     empty = identity_anchor.Reference(frozenset(), frozenset(), frozenset())
-    assert identity_anchor.classify(empty, "handle", "@alice") == "unknown"
-    assert identity_anchor.classify(None, "handle", "@alice") == "unknown"
+    assert identity_anchor.classify(empty, "handle", "@alina") == "unknown"
+    assert identity_anchor.classify(None, "handle", "@alina") == "unknown"
 
 
 # --- reference_prompt ------------------------------------------------------
@@ -153,9 +153,9 @@ def test_classify_unknown_paths():
 def test_reference_prompt_names_actors_and_is_bounded():
     ref = _ref()
     block = identity_anchor.reference_prompt(ref)
-    assert "@alice" in block
-    assert "alice cooper" in block
-    assert "alice@proton.me" in block
+    assert "@alina" in block
+    assert "alina cooper" in block
+    assert "alina@proton.me" in block
     assert "CONFIRMED ACTORS" in block
 
 
@@ -179,7 +179,7 @@ def _finding(entity, etype="handle"):
 
 def test_gate_annotates_match_without_changing_decision():
     ref = _ref()
-    base = _finding("@alice")
+    base = _finding("@alina")
     # decision WITHOUT a reference
     d_noref = investigator._promotion_gate(dict(base))
     # decision WITH a reference (annotation added)
@@ -198,7 +198,7 @@ def test_gate_scrubs_forged_annotation_no_match():
 
 
 def test_gate_scrubs_forged_annotation_even_without_reference():
-    f = _finding("@alice")
+    f = _finding("@alina")
     f["identity_anchor"] = "match"                   # forged, legacy no-reference path
     investigator._promotion_gate(f)
     assert "identity_anchor" not in f

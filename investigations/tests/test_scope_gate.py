@@ -38,7 +38,7 @@ def test_out_of_roster_denied():
 
 
 def test_search_enumeration_bounded():
-    # search NAMING an out-of-scope domain = enumerating the network → deny (4_points [066])
+    # search NAMING an out-of-scope domain = enumerating the network → deny (example_instance [066])
     a, why = scope.gate("Bash", {"command": "./invctl osint-tool perplexity \"stakekronx.us crypto scam canada\""}, ROSTER)
     _check("search naming an out-of-scope domain → denied (enumeration)", a is False and "lead" in why.lower())
     a, _ = scope.gate("mcp__perplexity__perplexity_ask", {"query": "muskrise.io operator attribution"}, ROSTER)
@@ -46,7 +46,7 @@ def test_search_enumeration_bounded():
 
 
 def test_search_attribution_and_general_allowed():
-    # search ABOUT an in-scope domain = attribution → allow (4_points [058]/[059])
+    # search ABOUT an in-scope domain = attribution → allow (example_instance [058]/[059])
     a, _ = scope.gate("Bash", {"command": "./invctl osint-tool perplexity \"trumpstake.us scam kit operator\""}, ROSTER)
     _check("search about an in-scope domain → allowed (attribution)", a is True)
     a, _ = scope.gate("mcp__kipi-osint__web_search", {"query": "Solana drainer methodology airdrop fraud"}, ROSTER)

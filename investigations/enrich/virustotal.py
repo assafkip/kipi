@@ -60,7 +60,7 @@ def _throttle() -> None:
 # result (no HTTP, no 16s wait) until the cooldown passes. Cross-process (lock-guarded
 # file) so it holds across the swarm's parallel subprocesses. A success/404 resets strikes.
 #
-# COOLDOWN is SHORT (replay D3): 4_points has no breaker and never self-harms because it
+# COOLDOWN is SHORT (replay D3): example_instance has no breaker and never self-harms because it
 # calls VT one-at-a-time (natural pacing). kipi's throttle already prevents most 4/min
 # bursts; a 600s lockout turned a transient blip that slipped through into a 10-MINUTE
 # run-wide VT outage. 90s comfortably clears the 60s rolling 4/min window, so a blip pauses

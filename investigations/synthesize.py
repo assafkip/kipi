@@ -52,7 +52,7 @@ PRIORITIZE BY OPERATIONAL URGENCY (this decides the headline):
 - The "OPERATIONAL STATUS" block in the input (if present) is the authoritative
   live/dead split — use it to order the brief.
 
-GRADE EVERY PIECE OF EVIDENCE (4_points A–F reliability scale):
+GRADE EVERY PIECE OF EVIDENCE (example_instance A–F reliability scale):
 - A = 2+ independent / official sources. B = 1 credible source. C = inferred / single
   web source. D = single unverified / self-reported. In the target dossiers, every
   evidence row carries its source + an A–F grade. A claim's confidence cannot exceed
@@ -61,7 +61,7 @@ GRADE EVERY PIECE OF EVIDENCE (4_points A–F reliability scale):
 Output: a single markdown brief with these exact sections:
   # Synthesis brief
   ## Executive summary  (3-5 sentences, the headline)
-  ## Key judgments  (the 4_points KJ structure: numbered KJ-1, KJ-2, … — each a single
+  ## Key judgments  (the example_instance KJ structure: numbered KJ-1, KJ-2, … — each a single
        declarative judgment with its calibrated confidence, ordered by importance. These
        are the load-bearing conclusions; everything below substantiates them.)
   ## Operational picture  (what is happening, who is doing it, what infra they use)
@@ -261,7 +261,7 @@ def _build_prompt(data: dict) -> str:
     if agent_findings:
         # k4p-03: feed the synthesizer per-TARGET dossiers (grouped by the finding's
         # entity), not a flat one-line list — so it can write connected per-target
-        # dossier sections with graded evidence, the 4_points report shape, instead of
+        # dossier sections with graded evidence, the example_instance report shape, instead of
         # a fact dump. Each line keeps its confidence so the A–F grading has a basis.
         by_target: dict = {}
         for f in agent_findings:

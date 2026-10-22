@@ -137,7 +137,7 @@ def test_promote_captures_evidence_on_promoted_node():
             "'http://newnode.example.com', ?, 'high')",
             (run, json.dumps({"a_record": "1.2.3.4"}))).lastrowid
         conn.commit()
-        out = promote.promote_result(conn, res, analyst="alice")
+        out = promote.promote_result(conn, res, analyst="alina")
         eid = out["entity_id"]
         # The promoted node is a DIFFERENT entity than the actor; its artifacts exist.
         arts = evidence.artifacts_for_entity(conn, eid)

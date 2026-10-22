@@ -11,7 +11,7 @@ Two consumers, both in investigations/agent/investigator.py:
   - classify() via _promotion_gate(): annotates a finding that matches a confirmed actor
     (identity_anchor='match'). Annotation ONLY — it never holds and never promotes.
 
-Deterministic, read-only, no LLM, no schema change. kipi stores handles BARE (`@alice`) and
+Deterministic, read-only, no LLM, no schema change. kipi stores handles BARE (`@alina`) and
 globally unique, so a same-handle-different-platform COLLISION cannot be expressed soundly
 per-finding; that reasoning is left to the grounded agent (it emits the conflation as its own
 finding, which the existing crosslink floor grades). See

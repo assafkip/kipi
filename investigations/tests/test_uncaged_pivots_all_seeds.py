@@ -5,7 +5,7 @@ Parity bug (case-031 diff): kipi's default run was caged (RULE-112 leads-first +
 one-hop) AND the second seed (trumpstake.us, stored as a `url` entity) was dropped
 from the roster because `url` is not a TARGET_TYPE. So the agent was both forbidden
 from pivoting AND unaware of the second seed — it never ran WHOIS on trumpstake.us,
-the exact move that recovered the operator (Markk Bennett) in 4_points.
+the exact move that recovered the operator (John Doe) in example_instance.
 
 This test pins the fix:
   1. `_case_roster` host-normalizes a url-typed seed into a domain target, so every
@@ -100,16 +100,16 @@ _AGENT_JSON = json.dumps({
          "confidence": "high", "provenance": "virustotal: 3/91 malicious"},
         {"entity": "trumpstake.us", "entity_type": "domain", "claim": "registrant recovered",
          "confidence": "high", "provenance": "whois: trumpstake.us"},
-        {"entity": "Markk Bennett", "entity_type": "person", "claim": "registrant of trumpstake.us",
+        {"entity": "John Doe", "entity_type": "person", "claim": "registrant of trumpstake.us",
          "confidence": "high", "provenance": "whois: trumpstake.us registrant"},
     ],
     "relationships": [
-        {"src": "trumpstake.us", "dst": "Markk Bennett", "rel_type": "registered_by",
+        {"src": "trumpstake.us", "dst": "John Doe", "rel_type": "registered_by",
          "direction": "src_to_dst", "confidence": "high", "provenance": "whois"},
         {"src": "trumpfundus.com", "dst": "trumpstake.us", "rel_type": "same_campaign",
          "direction": "src_to_dst", "confidence": "medium", "provenance": "same scam kit"},
     ],
-    "summary": "two-domain Trump scam; operator Markk Bennett recovered from the .us WHOIS",
+    "summary": "two-domain Trump scam; operator John Doe recovered from the .us WHOIS",
 })
 
 
@@ -127,8 +127,8 @@ def test_uncaged_run_lands_operator_and_links_both_seeds():
                  "result": "whois trumpfundus.com — Cloudflare, registrant privacy"},
                 {"n": 2, "type": "tool", "tool": "infra",
                  "input": {"query": "trumpstake.us"},
-                 "result": "whois trumpstake.us — registrant Markk Bennett "
-                           "markk.bennett.2025@gmail.com +1.807.525.8080"},
+                 "result": "whois trumpstake.us — registrant John Doe "
+                           "john.doe.operator@example.com +1.202.555.0143"},
             ]
 
             def fake_run_agent(task, **kw):
@@ -143,9 +143,9 @@ def test_uncaged_run_lands_operator_and_links_both_seeds():
                 _ok("run ok", out.get("ok"))
                 # The operator was recorded as a finding (gated or promoted, but present).
                 op = conn.execute(
-                    "SELECT COUNT(*) FROM enrichment_results WHERE title LIKE '%Markk Bennett%' "
-                    "OR summary LIKE '%Markk Bennett%'").fetchone()[0]
-                _ok("operator (Markk Bennett) landed as a finding", op >= 1)
+                    "SELECT COUNT(*) FROM enrichment_results WHERE title LIKE '%John Doe%' "
+                    "OR summary LIKE '%John Doe%'").fetchone()[0]
+                _ok("operator (John Doe) landed as a finding", op >= 1)
                 # The two seeds are linked (same_campaign edge between them).
                 link = conn.execute(
                     "SELECT COUNT(*) FROM typed_relationships tr "
