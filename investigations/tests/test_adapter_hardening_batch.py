@@ -104,11 +104,11 @@ def test_promote_as_hint():
 def test_git_osint_low_confidence_leads(monkeypatch):
     monkeypatch.setattr(git_osint.shutil, "which", lambda b: "/usr/bin/git")
     monkeypatch.setattr(git_osint, "_mine_repo",
-                        lambda url, timeout=90: [("alice@example.com", "Alice")])
+                        lambda url, timeout=90: [("alina@example.com", "Alina")])
     out = git_osint.GitOsintAdapter().run("https://github.com/x/y")
-    lead = [r for r in out[1:] if r.title == "alice@example.com"]
+    lead = [r for r in out[1:] if r.title == "alina@example.com"]
     assert lead and lead[0].confidence == "low"
-    assert promote._classify("alice@example.com") == "email"
+    assert promote._classify("alina@example.com") == "email"
 
 
 def test_git_osint_needs_git(monkeypatch):

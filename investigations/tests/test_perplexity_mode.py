@@ -1,4 +1,4 @@
-"""Deterministic perplexity model escalation (D2, replay-4points-case031).
+"""Deterministic perplexity model escalation (D2, replay-example_instance-case031).
 
 The agent's web_search was hard-locked to the cheap `sonar` model, which whiffed on
 network/attribution research. `_perplexity_mode` escalates to `reasoning` for those
@@ -15,7 +15,7 @@ def _check(label, got, want):
 
 
 def test_attribution_queries_escalate():
-    # the exact 4_points-style query that sonar failed on
+    # the exact example_instance-style query that sonar failed on
     q = ("Crypto scam sites trumpstake.us and trumpfundus.com use /trumpColorDSGN/ "
          "and /muskColorDSGN/ - a multi-celebrity scam kit. What other domains belong "
          "to this network? Any Russian infrastructure nexus?")

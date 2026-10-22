@@ -1034,7 +1034,7 @@ async def entity_detail(request: Request, entity_id: int):
         if profiles_dir.exists():
             for candidate in profiles_dir.glob("*.md"):
                 content = candidate.read_text(encoding="utf-8")
-                # Anchored to the frontmatter line so '@al' can't match '@alice'.
+                # Anchored to the frontmatter line so '@al' can't match '@alina'.
                 if any(ln.strip() == f"name: {entity['canonical_name']}"
                        for ln in content.splitlines()[:8]):
                     # Strip YAML frontmatter so it doesn't render as body text.
@@ -1851,7 +1851,7 @@ def _investigate_swarm(case: str, shallow: bool, on_event=None, cancel=None,
     decision 2026-06-05, revises 2026-06-03). The old default fanned out twice —
     `volley` (one agent per entity) then `investigate_entity_crew` (per-dimension
     sub-agents) — which wasted spawns AND lost the cross-entity pivots that are the
-    highest-value findings (replay D4). Both modes now use the 4_points one-agent model:
+    highest-value findings (replay D4). Both modes now use the example_instance one-agent model:
       - default → `investigate_case_agentic(max_passes=1)` — ONE bounded pass, NO
         fan-out. The agent drives its own paths within the pass, then STOPS; the
         analyst expands further via deep or per-node. Bounded (1 pass) < deep.
@@ -1865,7 +1865,7 @@ def _investigate_swarm(case: str, shallow: bool, on_event=None, cancel=None,
                 max_passes=investigator.CASE_MAX_PASSES, deep=True)
         # DEFAULT (k4p-01 un-cage + k4p-02 completeness): ONE agent over the whole case,
         # NO fan-out, UN-CAGED — it pivots freely to every seed + the assets it surfaces
-        # (the 4_points shape) and runs to COMPLETENESS (covered/dry), not a single hop
+        # (the example_instance shape) and runs to COMPLETENESS (covered/dry), not a single hop
         # and not a budget cut. CASE_MAX_PASSES is only a hard backstop; the completeness
         # stop concludes earlier. `shallow=True` opts back into RULE-112 leads-first.
         return investigator.investigate_case_agentic(

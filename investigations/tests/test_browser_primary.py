@@ -2,7 +2,7 @@
 
 The old persona framed the headless browser as an EXPENSIVE last resort ("only
 when jina/WebFetch fails"), so the agent missed the wallet/payment/affiliate
-endpoints injected by client-side JS (the 4_points script.js depth). This asserts
+endpoints injected by client-side JS (the example_instance script.js depth). This asserts
 the persona now promotes browser_network_requests + browser_evaluate as a primary
 move, not a fallback.
 

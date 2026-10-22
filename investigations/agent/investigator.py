@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 # Cost lever (audit 2026-06-03): the agent CLI was UNPINNED → inherited the claude
-# default (Opus-tier). 4_points runs its swarm on Sonnet ("5x cheaper than Opus"); match
+# default (Opus-tier). example_instance runs its swarm on Sonnet ("5x cheaper than Opus"); match
 # it. Override per run/instance with KIPI_AGENT_MODEL (e.g. claude-opus-4-8 for a hard
 # case, claude-haiku-4-5 for a cheap sweep).
 AGENT_MODEL = os.environ.get("KIPI_AGENT_MODEL", "claude-sonnet-4-6")
@@ -322,7 +322,7 @@ PLAYBOOK BY TARGET TYPE (run all that apply):
                        NOT a last resort: browser_navigate -> browser_wait_for, then
                        browser_network_requests (the XHR/fetch + script.js calls carry
                        the payout wallet, payment API, and affiliate endpoints — this is
-                       the 4_points script.js depth) AND browser_evaluate (pull the
+                       the example_instance script.js depth) AND browser_evaluate (pull the
                        JS-injected DOM: wallet, contacts, linked sites). On these pages
                        static fetch alone misses everything that matters — reach for
                        network_requests + evaluate early, don't wait for jina to fail.
@@ -1059,7 +1059,7 @@ def _is_infra_source(step: dict) -> bool:
 
 
 def _asset_confidence(entity_type: str | None, infra: int, srcs: int, conf: str) -> str:
-    """Per-asset-type TENTATIVE/FIRM/CONFIRMED (G-ASSET-PERTYPE, 4_points' per-type
+    """Per-asset-type TENTATIVE/FIRM/CONFIRMED (G-ASSET-PERTYPE, example_instance's per-type
     table). Different asset classes are confirmed by different evidence:
       - infra (domain/IP/URL/...): by INFRA tools (DNS/WHOIS/cert/passive-DNS).
       - identifier (email/wallet/hash/handle/telegram): NOT DNS-confirmable, so by
@@ -1079,7 +1079,7 @@ def _asset_confidence(entity_type: str | None, infra: int, srcs: int, conf: str)
 
 
 def _grade_finding(f: dict) -> tuple[str, str]:
-    """4_points-style source-reliability grade (A–D) + asset-confidence
+    """example_instance-style source-reliability grade (A–D) + asset-confidence
     (TENTATIVE/FIRM/CONFIRMED), from how many tools — and how many AUTHORITATIVE infra
     tools — independently surfaced the finding's entity in their RESULT.
 
@@ -1088,7 +1088,7 @@ def _grade_finding(f: dict) -> tuple[str, str]:
     D = unverifiable (no tool result contains it) or agent-marked unvalidated.
     Asset confidence keys off infra confirmations only: CONFIRMED ≥2, FIRM =1, else
     TENTATIVE — so a domain is 'CONFIRMED in the cluster' only on shared infra, never
-    on a web co-mention (the reproducibility fix, matching 4_points)."""
+    on a web co-mention (the reproducibility fix, matching example_instance)."""
     srcs = f.get("source_count") or 0
     infra = f.get("infra_source_count") or 0
     conf = (f.get("confidence") or "medium").lower()
@@ -1108,7 +1108,7 @@ def _grade_finding(f: dict) -> tuple[str, str]:
 
 
 def _promotion_gate(f: dict, reference: "identity_anchor.Reference | None" = None) -> tuple[bool, str]:
-    """Whether a finding may auto-build the graph, and if not, why — on the 4_points
+    """Whether a finding may auto-build the graph, and if not, why — on the example_instance
     A–D reliability model. The agent's self-declared flags are NOT trusted alone:
     the grade is computed from independent tool corroboration (_attribute_findings).
     Grade A/B promote; C/D LAND but stay gated as LEADS in /enrich for the analyst.
@@ -1547,7 +1547,7 @@ def _land_same_as(conn, parsed: dict, rep_id: int, case: str | None = None) -> i
 
 
 def _namesake_collision_risk(conn, a: int, b: int, conf: str) -> bool:
-    """G-NAMECOLLISION (4_points Phase-3 step 4): a same_as merge of two PERSON/HANDLE
+    """G-NAMECOLLISION (example_instance Phase-3 step 4): a same_as merge of two PERSON/HANDLE
     entities is a namesake risk — two different people sharing a common name. Require
     high confidence OR a corroborating shared neighbor before merging; otherwise return
     True so the caller SPLITS (skips the merge) instead of conflating them."""
@@ -1569,7 +1569,7 @@ def _namesake_collision_risk(conn, a: int, b: int, conf: str) -> bool:
 
 
 def _land_contradictions(conn, parsed: dict, rep_id: int, case: str | None = None) -> int:
-    """G-CONTRADICT (4_points Phase-3 step 3): persist the agent's reported contradictions
+    """G-CONTRADICT (example_instance Phase-3 step 3): persist the agent's reported contradictions
     as 'contradicts' edges, keeping BOTH conflicting claims visible — never silently pick
     one. The agent emits `contradictions: [{entity_a, entity_b, note}]` for facts that
     conflict across sources."""
@@ -2335,7 +2335,7 @@ ROLE_AGENTS = [
             "emails, linked sites. But on a SCAM/PAYMENT/JS-heavy page the BROWSER is a "
             "PRIMARY move, not a last resort: browser_navigate -> browser_wait_for, then "
             "browser_network_requests (XHR/fetch + script.js carry the payout wallet, payment "
-            "API, affiliate endpoints — the 4_points script.js depth) AND browser_evaluate "
+            "API, affiliate endpoints — the example_instance script.js depth) AND browser_evaluate "
             "(JS-injected DOM). On these pages static fetch misses what matters — reach for "
             "network_requests + evaluate early. Return findings for the assets you pulled."},
     {"role": "attribution", "model": AGENT_MODEL,
@@ -2488,7 +2488,7 @@ def investigate_entity_crew(conn, entity: str, case: str | None = None,
 
 
 # --- Persona-driven WHOLE-CASE investigation -----------------------------------
-# One agent run owns the case and drives its own paths (the 4_points model). The
+# One agent run owns the case and drives its own paths (the example_instance model). The
 # governor is turns + a wall-clock timeout on the single run; the agent self-stops
 # via the completeness rubric in CASE_PERSONA. Tune with the envs.
 CASE_MAX_TURNS = int(os.environ.get("KIPI_CASE_TURNS", "80"))
@@ -2544,7 +2544,7 @@ until the network is mapped" guidance below.
 def _build_case_persona(bounded: bool = False) -> str:
     """The whole-case investigator persona — it DRIVES its own investigation and
     decides its own paths (replaces the Python plan→volley→re-plan loop). Ported from
-    the 4_points phase doctrine, retargeted from person-dossier to scam/infra network,
+    the example_instance phase doctrine, retargeted from person-dossier to scam/infra network,
     with the recursive completeness self-evaluation as the stop/continue engine.
     `bounded` prepends the leads-first directive so the prompt aligns with the scope hook."""
     _base = """You are a Senior Staff Investigator in Security, Safety & Fraud at a
@@ -2563,9 +2563,9 @@ PHASE DOCTRINE (run it, loop as needed):
 1. SEED — INTERNAL INTEL BEFORE GOING EXTERNAL. Start from the case GOAL and the entity
    ROSTER in the task — these are the internal case-DB entities. EXHAUST them (read what
    the case already knows: every roster entity, every report mention) BEFORE spending on
-   external collection. (4_points Phase 1.5: internal intel is graded high; don't skip it.)
+   external collection. (example_instance Phase 1.5: internal intel is graded high; don't skip it.)
    The roster is your entry point, not your boundary.
-1b. ESCALATION TIERS — CHEAP-FIRST, escalate only as needed (4_points Levels 1->4):
+1b. ESCALATION TIERS — CHEAP-FIRST, escalate only as needed (example_instance Levels 1->4):
    - Level 1 (free infra): crt.sh / DNS / WHOIS / RDAP / reverse-WHOIS / passive-DNS — run
      these FIRST to enumerate the cluster deterministically (pass 0 is infra-only).
    - Level 1.5 (free breach intel): check breach exposure before any paid scraping.
@@ -2581,7 +2581,7 @@ PHASE DOCTRINE (run it, loop as needed):
               emails, social handles. On a SCAM/PAYMENT/JS-heavy page the BROWSER is a
               PRIMARY move, not a fallback: browser_navigate -> browser_wait_for, then
               browser_network_requests (XHR/fetch + script.js = payout wallet, payment
-              API, affiliate endpoints — the 4_points script.js depth) AND
+              API, affiliate endpoints — the example_instance script.js depth) AND
               browser_evaluate (JS-injected wallet/links). Reach for network_requests +
               evaluate early; do NOT report "JS constraint" and stop. If DNS is DEAD
               (no current A record), pull
@@ -2852,7 +2852,7 @@ def _covered_names(parsed: dict, run: dict, seeded: list[str]) -> set[str]:
 
 
 def _completeness_score(parsed: dict) -> dict:
-    """G-COMPLETENESS (4_points Phase 5): a numeric completeness read of the case —
+    """G-COMPLETENESS (example_instance Phase 5): a numeric completeness read of the case —
     a coverage_check (findings? infra-confirmed nodes? relationships? assessment?
     next-pivots?), a source_diversity count (distinct tools that produced findings), and
     a 0..1 depth_score. Surfaced so a run is judged on quality, not just 'inventory empty'."""
@@ -2873,10 +2873,10 @@ def _completeness_score(parsed: dict) -> dict:
 
 
 def _coverage_met(completeness: dict) -> bool:
-    """k4p-02 completeness STOP condition (4_points Phase 5): the case is covered when the
+    """k4p-02 completeness STOP condition (example_instance Phase 5): the case is covered when the
     network is found, attributed, AND its links are mapped — found stuff (has_findings) +
     a who/what assessment (has_assessment) + at least one mapped relationship
-    (has_relationships). This is what 4_points concludes on, NOT a budget or hop count."""
+    (has_relationships). This is what example_instance concludes on, NOT a budget or hop count."""
     cc = (completeness or {}).get("coverage_check") or {}
     return bool(cc.get("has_findings") and cc.get("has_assessment")
                 and cc.get("has_relationships"))
@@ -2964,7 +2964,7 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
     `caged` (k4p-01, default OFF): when True, RULE-112 leads-first is enforced — the
     agent may only INVESTIGATE entities already in the case roster; a newly-surfaced
     one is denied by the PreToolUse hook and lands as a lead. This is the opt-in
-    shallow/cheap mode. The DEFAULT (caged=False) is the 4_points shape: the single
+    shallow/cheap mode. The DEFAULT (caged=False) is the example_instance shape: the single
     agent pivots freely to every seed and the assets it surfaces (the cage was the
     case-031 operator miss — it forbade the WHOIS-on-the-second-seed pivot)."""
     from investigations.agent import swarm
@@ -3015,7 +3015,7 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
     last_assessment: dict = {}  # k4p-02: cumulative (keep the last non-empty attribution)
     # RULE-112 scope bound (leads-first) — OPT-IN only (caged=True). Decoupled from
     # `deep` (k4p-01): un-caging is the default so one agent works every seed + pivots
-    # freely, like 4_points. `caged` re-enables the bound for the shallow/cheap mode.
+    # freely, like example_instance. `caged` re-enables the bound for the shallow/cheap mode.
     bound_roster = None
     if caged and case:
         bound_roster = _case_bound_roster(conn, case)
@@ -3104,7 +3104,7 @@ def investigate_case_agentic(conn, case: str | None, max_turns: int = CASE_MAX_T
         if spent >= cost_cap:
             stop_reason = "cost-capped"
             break
-        # k4p-02 COMPLETENESS-AS-STOP (4_points Phase 5): the run concludes on coverage,
+        # k4p-02 COMPLETENESS-AS-STOP (example_instance Phase 5): the run concludes on coverage,
         # not a hop count or a budget. Coverage is CUMULATIVE over the whole case (Codex):
         # every in-scope target worked + the case attributed (assessment) + its links
         # mapped (relationships exist in the case) — NOT just "the last pass had a finding".

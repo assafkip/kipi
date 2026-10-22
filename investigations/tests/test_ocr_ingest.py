@@ -36,7 +36,7 @@ def test_xlsx_structural():
         xlsx = Path(d) / "actors.xlsx"
         wb = Workbook(); ws = wb.active
         ws.append(["name", "wallet", "email"])
-        ws.append(["Alice Smith", "0x1111111111111111111111111111111111111111", "a@evil.com"])
+        ws.append(["Alina Smith", "0x1111111111111111111111111111111111111111", "a@evil.com"])
         ws.append(["Bob Jones", "0x2222222222222222222222222222222222222222", "b@evil.com"])
         wb.save(xlsx)
         with db.connect(dbp) as conn:

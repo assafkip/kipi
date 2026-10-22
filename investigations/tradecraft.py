@@ -1,7 +1,7 @@
 """Tradecraft gates for the chat investigator.
 
 The chat is a fast, rule-free agent (warm_session runs setting_sources=[]), so the
-analytical discipline that 4_points enforces via the /q-* commands never reached it.
+analytical discipline that example_instance enforces via the /q-* commands never reached it.
 This module makes the tradecraft steps first-class in the chat: a per-case checklist
 the analyst drives by pressing buttons, with state that is CODE-ENFORCED (a step is
 "done" when its artifact row exists), not a prompt rule the agent can skip.

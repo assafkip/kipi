@@ -46,7 +46,7 @@ def test_agent_builds_graph():
         p = Path(tmp) / "t.db"
         src = _seed(p)
         # A BACKED finding (≥2 tools surfaced it, high confidence, real step) — the
-        # values _attribute_findings would set in the real flow. 4_points A-F model: a
+        # values _attribute_findings would set in the real flow. example_instance A-F model: a
         # DOMAIN promotes only when INFRA-confirmed; this was surfaced by whois (infra),
         # so infra_source_count>=1 → grade A → promotes.
         parsed = {"summary": "s", "findings": [
@@ -84,7 +84,7 @@ def test_agent_builds_graph():
                 "SELECT id FROM entities WHERE canonical_name = 'gated-only.com'").fetchone()
             _check("unbacked finding makes no graph node", node is None)
 
-        # 4_points reproducibility rule: a domain seen ONLY in web recall (2 web sources,
+        # example_instance reproducibility rule: a domain seen ONLY in web recall (2 web sources,
         # 0 infra) is grade B but NOT a cluster node — it lands as a LEAD. This is the fix
         # for "perplexity-recalled domains reshuffle the graph every run".
         web_only = {"summary": "s", "findings": [

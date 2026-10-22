@@ -3,7 +3,7 @@ deep-investigate loop (the swarm x ultracode fusion).
 
 - plan_investigation: the persona pass — a senior investigator reads the case and
   DECIDES the targets (replaces the old ORDER BY threat_score sort).
-- volley: fan out the investigator agent over many targets at once (the 4_points
+- volley: fan out the investigator agent over many targets at once (the example_instance
   first-volley -> parallel -> merge pattern). Findings auto-promote to the graph.
 - deep_investigate: volley -> adversarial verify each finding -> loop on the new
   pivots the findings surfaced, until a round adds nothing (loop-until-dry). This

@@ -222,7 +222,7 @@ def test_full_job_chain_wired(mp):
                                     "raw": {"total_cost_usd": 0.1, "num_turns": 5},
                                     "events": [], "steps": [], "capped": False})
         # Run the whole-case DEEP job synchronously (deep → persona coordinator, the
-        # 4_points engine). This is what the route's thread calls.
+        # example_instance engine). This is what the route's thread calls.
         app_module._investigate_job(None, "cx", "ally", shallow=False, deep=True)
         job = app_module._INVESTIGATE_JOBS.get(app_module._investigate_key("cx"))
         _check("job finished done", job and job.get("status") == "done")

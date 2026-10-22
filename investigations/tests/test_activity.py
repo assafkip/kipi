@@ -20,18 +20,18 @@ def main():
             conn.commit()
 
             # Attribution: a note records its author.
-            annotations.set_notes(conn, x, "alice's note", author="alice")
+            annotations.set_notes(conn, x, "alina's note", author="alina")
             a = annotations.get(conn, x)
-            assert a["notes"] == "alice's note" and a["notes_author"] == "alice", a
+            assert a["notes"] == "alina's note" and a["notes_author"] == "alina", a
 
             # Two analysts log actions; the feed shows who did what.
-            activity.log(conn, "alice", "edited notes", entity_id=x, investigation="case-x")
+            activity.log(conn, "alina", "edited notes", entity_id=x, investigation="case-x")
             activity.log(conn, "bob", "flagged actor", entity_id=x, investigation="case-x")
             activity.log(conn, "carol", "resolved a contradiction", investigation="other-case")
 
             feed = activity.recent(conn)
             assert len(feed) == 3, f"expected 3 activity rows, got {len(feed)}"
-            assert feed[0]["analyst"] in {"alice", "bob", "carol"}
+            assert feed[0]["analyst"] in {"alina", "bob", "carol"}
             # Newest first + carries the entity name.
             assert any(e["analyst"] == "bob" and e["canonical_name"] == "@x" for e in feed), feed
 

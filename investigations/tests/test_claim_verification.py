@@ -22,7 +22,7 @@ def test_hard_token_extraction():
     t = inv._claim_hard_tokens
     _check("ISO date", "2025-12-22" in t("registered 2025-12-22 via namecheap"))
     _check("IPv4", "104.21.42.70" in t("resolves to 104.21.42.70"))
-    _check("email", "markk.bennett.2025@gmail.com" in t("contact markk.bennett.2025@gmail.com"))
+    _check("email", "john.doe.operator@example.com" in t("contact john.doe.operator@example.com"))
     _check("eth wallet", ("0x" + "a"*40) in t("payout 0x" + "A"*40))
     _check("soft claim has no hard tokens", t("fake Trump casino impersonation") == set())
 

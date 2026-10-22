@@ -1,5 +1,5 @@
 """k4p-02 reproducer: the whole-case run concludes on COMPLETENESS (coverage), not a
-fixed hop count and not a budget cut (founder: "no budget hop"). 4_points Phase 5.
+fixed hop count and not a budget cut (founder: "no budget hop"). example_instance Phase 5.
 
 Pins:
   1. `_coverage_met` — covered when the network is found + attributed + linked.
@@ -70,10 +70,10 @@ def _seed_case(conn):
 _COVERED = json.dumps({
     "findings": [{"entity": "trumpfundus.com", "entity_type": "domain", "claim": "drainer",
                   "confidence": "high", "provenance": "virustotal"}],
-    "relationships": [{"src": "trumpfundus.com", "dst": "Markk Bennett", "rel_type": "registered_by",
+    "relationships": [{"src": "trumpfundus.com", "dst": "John Doe", "rel_type": "registered_by",
                        "direction": "src_to_dst", "confidence": "high", "provenance": "whois",
                        "corroborated": True}],
-    "assessment": {"attributed_actor": "Markk Bennett", "best_judgment": "trump scam operator"},
+    "assessment": {"attributed_actor": "John Doe", "best_judgment": "trump scam operator"},
     "summary": "covered",
 })
 
@@ -85,7 +85,7 @@ def test_run_stops_on_covered():
             _seed_case(conn)
             steps = [{"n": 1, "type": "tool", "tool": "infra",
                       "input": {"query": "trumpfundus.com"},
-                      "result": "whois trumpfundus.com — Markk Bennett registrant"}]
+                      "result": "whois trumpfundus.com — John Doe registrant"}]
             orig = investigator._run_agent
             investigator._run_agent = lambda task, **k: {"ok": True, "result_text": _COVERED,
                                                          "steps": steps, "raw": [], "capped": False}
@@ -131,7 +131,7 @@ def test_covered_requires_every_seed_worked():
             conn.commit()
             # The agent only ever covers seed #1; seed #2 stays unworked every pass.
             steps = [{"n": 1, "type": "tool", "tool": "infra", "input": {"query": "trumpfundus.com"},
-                      "result": "whois trumpfundus.com — Markk Bennett"}]
+                      "result": "whois trumpfundus.com — John Doe"}]
             orig = investigator._run_agent
             investigator._run_agent = lambda task, **k: {"ok": True, "result_text": _COVERED,
                                                          "steps": steps, "raw": [], "capped": False}

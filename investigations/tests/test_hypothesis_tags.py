@@ -45,13 +45,13 @@ def test_set_tag_and_read():
     path = _db_path()
     with db.connect(path) as conn:
         eid = _mk_edge(conn)
-        out = hypotheses.set_tag(conn, eid, "single affiliate", "supports", author="alice")
+        out = hypotheses.set_tag(conn, eid, "single affiliate", "supports", author="alina")
         assert out["ok"]
         tags = hypotheses.tags_for_edge(conn, eid)
         assert len(tags) == 1
         assert tags[0]["stance"] == "supports"
         assert tags[0]["hypothesis"] == "single affiliate"
-        assert tags[0]["author"] == "alice"
+        assert tags[0]["author"] == "alina"
 
 
 def test_bad_stance_rejected():
@@ -142,8 +142,8 @@ def test_concurrent_same_key_writes_stay_idempotent():
         eid = _mk_edge(conn)
     # Two separate connections write the same (edge, hypothesis, author).
     with db.connect(path) as c1, db.connect(path) as c2:
-        out1 = hypotheses.set_tag(c1, eid, "single affiliate", "supports", author="alice")
-        out2 = hypotheses.set_tag(c2, eid, "single affiliate", "contradicts", author="alice")
+        out1 = hypotheses.set_tag(c1, eid, "single affiliate", "supports", author="alina")
+        out2 = hypotheses.set_tag(c2, eid, "single affiliate", "contradicts", author="alina")
         assert out1["ok"] and out2["ok"], "both same-key writes must succeed"
     with db.connect(path) as conn:
         tags = hypotheses.tags_for_edge(conn, eid)

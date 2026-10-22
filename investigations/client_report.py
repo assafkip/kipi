@@ -43,7 +43,7 @@ def _top_actors(conn, case: str, limit: int = 12) -> list[dict]:
 
 
 def _dossier_matches(content: str, name: str) -> bool:
-    # Anchored to the frontmatter line, so '@al' doesn't match '@alice'.
+    # Anchored to the frontmatter line, so '@al' doesn't match '@alina'.
     return any(line.strip() == f"name: {name}" for line in content.splitlines()[:8])
 
 

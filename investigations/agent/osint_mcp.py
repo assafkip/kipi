@@ -1,8 +1,8 @@
 """kipi-osint MCP server — exposes kipi's OSINT adapters as MCP tools.
 
 This is the "MCP plugin" the investigator agent (and any MCP client) uses. Rather
-than copying 4_points/huntkit's osint-infra + threat-intel servers as a fourth
-fork (the drift the 4_points review warned about), it wraps kipi's OWN enrich
+than copying example_instance/huntkit's osint-infra + threat-intel servers as a fourth
+fork (the drift the example_instance review warned about), it wraps kipi's OWN enrich
 adapters — one source of truth. Same capability: cert transparency, WHOIS/DNS,
 VirusTotal, abuse.ch, search.
 
@@ -24,8 +24,8 @@ mcp = FastMCP("kipi-osint")
 # Perplexity's cheap default `sonar` model whiffs on multi-entity / attribution
 # research -- it latches onto surface keywords and won't reconcile a network.
 # Deterministically escalate to `reasoning` (sonar-reasoning-pro) for those queries.
-# Replay D2 (replay-4points-case031): sonar returned sewing/color-blocking pages for
-# the *ColorDSGN kit; reasoning matched 4_points (Bitdefender domains + Russian nexus).
+# Replay D2 (replay-example_instance-case031): sonar returned sewing/color-blocking pages for
+# the *ColorDSGN kit; reasoning matched example_instance (Bitdefender domains + Russian nexus).
 _ATTRIBUTION_SIGNALS = (
     "network", "attribution", "linked", "tied to", "same operator", "cluster",
     "registrar", "infrastructure", "nexus", "campaign", "other domains",

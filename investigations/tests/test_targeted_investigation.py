@@ -42,10 +42,10 @@ def test_selected_set_dispatches_exactly(mp):
         mp.setattr(swarm, "plan_investigation", _planner_must_not_run)
         events = []
         with db.connect(dbp) as conn:
-            res = swarm.investigate_selected(conn, "cx", ["Alice", "bob", "Alice ", " "],
+            res = swarm.investigate_selected(conn, "cx", ["Alina", "bob", "Alina ", " "],
                                              on_event=events.append)
         _check("dedup + blank-strip → 2 targets", res["targets"] == 2)
-        _check("dispatched exactly the 2 unique targets", sorted(calls) == ["Alice", "bob"])
+        _check("dispatched exactly the 2 unique targets", sorted(calls) == ["Alina", "bob"])
         _check("findings summed from the set", res["findings"] == 2)
         _check("emitted the 'picked N' progress marker",
                any(e.startswith("picked 2 target(s)") for e in events))

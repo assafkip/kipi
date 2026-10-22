@@ -64,7 +64,7 @@ def main():
     _check("breaker now tripped", virustotal._breaker_tripped())
 
     # replay D3: a transient blip must NOT lock VT out for 10 minutes. Cooldown shrunk
-    # 600s -> short, so the breaker reopens quickly (4_points has no lockout at all).
+    # 600s -> short, so the breaker reopens quickly (example_instance has no lockout at all).
     import time as _t
     until = virustotal._breaker_read().get("until", 0)
     _check("breaker cooldown shrunk to <= 120s (was 600 — no 10-min run-wide lockout)",

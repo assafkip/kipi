@@ -10,7 +10,7 @@ from investigations.ingest import record_ingest
 from investigations.cli import invctl
 
 CSV = """name,wallet,email,domain,note
-Alice Smith,0x1111111111111111111111111111111111111111,alice@evil.com,evil-shop.com,promoter
+Alina Smith,0x1111111111111111111111111111111111111111,alina@evil.com,evil-shop.com,promoter
 Bob Jones,0x2222222222222222222222222222222222222222,bob@evil.com,evil-shop.com,dev
 """
 
@@ -43,7 +43,7 @@ def test_csv_columns_typed():
             _check("wallet case_type set", w["case_type"], "crypto_wallet")
 
             em = conn.execute("SELECT entity_type FROM entities WHERE canonical_name=?",
-                              ("alice@evil.com",)).fetchone()
+                              ("alina@evil.com",)).fetchone()
             _check("email typed", em["entity_type"], "email")
 
             dom = conn.execute("SELECT COUNT(*) FROM entities WHERE canonical_name=? AND entity_type='domain'",
