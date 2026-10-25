@@ -56,6 +56,11 @@ def test_actor_input_shapes():
     _check("youtube input carries the start URL",
            yt.get("startUrls") == [{"url": "https://youtube.com/@c"}])
     _check("youtube input asks for subtitles (transcript)", yt.get("subtitles") is True)
+    li = ACTOR_INPUT_BUILDERS["johnvc/linkedin-profile-api"]("some-handle")
+    _check("linkedin input wraps a bare handle as a profile URL",
+           li.get("profileUrls") == ["https://www.linkedin.com/in/some-handle"])
+    tw = ACTOR_INPUT_BUILDERS["apidojo/tweet-scraper"]("from:whale_alert")
+    _check("twitter input carries the search terms", tw.get("searchTerms") == ["from:whale_alert"])
 
 
 def test_mcp_tool_runs_the_right_actor(mp):

@@ -1,6 +1,6 @@
 """Apify adapter — run any of 55+ ready-made actors.
 
-Mode is the actor slug (`apify/web-scraper`, `nasta/linkedin-profile-scraper`, etc.).
+Mode is the actor slug (`apify/web-scraper`, `johnvc/linkedin-profile-api`, etc.).
 The query passed in is JSON-encoded actor input — or just a URL / handle that
 the adapter wraps in the actor's expected input shape.
 """
@@ -24,9 +24,9 @@ ACTOR_INPUT_BUILDERS = {
     "apify/website-content-crawler": lambda q: {"startUrls": [{"url": q}], "maxCrawlPages": 5},
     "apify/google-search-scraper": lambda q: {"queries": q, "maxPagesPerQuery": 1, "resultsPerPage": 10},
     "apify/instagram-profile-scraper": lambda q: {"usernames": [q.lstrip("@")]},
-    "apify/twitter-scraper-lite": lambda q: {"searchTerms": [q], "maxItems": 20},
+    "apidojo/tweet-scraper": lambda q: {"searchTerms": [q], "maxItems": 20},
     "curious_coder/twitter-scraper": lambda q: {"searchTerms": [q], "maxItems": 20},
-    "nasta/linkedin-profile-scraper": lambda q: {"urls": [q] if q.startswith("http") else [f"https://www.linkedin.com/in/{q}"]},
+    "johnvc/linkedin-profile-api": lambda q: {"profileUrls": [q] if q.startswith("http") else [f"https://www.linkedin.com/in/{q}"]},
     # Content platforms (resolved by enrich.social): pull profile + recent posts.
     "clockworks/tiktok-profile-scraper": lambda q: {
         "profiles": [q.lstrip("@")], "resultsPerPage": 10,
